@@ -225,7 +225,7 @@ def build_minimal_env():
     cbf = CBFController(
         v_max=robot.v_max,
         w_max=robot.yaw_rate_max,
-        d_safe=0.10,
+        d_safe=0.05,
         gamma=5.0,
         k_v=1.5,
         k_w=2.5,

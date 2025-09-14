@@ -10,10 +10,12 @@ class CBFController:
     def __init__(self,
                  v_max: float = 0.3,
                  w_max: float = 1.0,
-                 d_safe: float = 0.08,
+                 d_safe: float = 0.05,
                  max_obs: int = 64,
                  gamma: float = 5.0,  # CBF parameter
-                 k_w: float = 2.5,    # P-controller gain for omega
+                 w_slack: float = 3000.0,
+                 k_v: float = 2.0,
+                 k_w: float = 2.0,    # P-controller gain for omega
                  cluster_radius_m: float = 0.03,
                  ):
         """
@@ -30,6 +32,8 @@ class CBFController:
         self.d_safe = d_safe
         self.max_obs = max_obs
         self.gamma = gamma
+        self.w_slack = w_slack
+        self.k_v = k_v
         self.k_w = k_w
         self.cluster_radius_m = cluster_radius_m
         self._build_qp()
@@ -42,10 +46,11 @@ class CBFController:
 
         # Parameters
         u_ref = ca.MX.sym('u_ref', 2)      # Nominal control [v_ref, w_ref]
+        delta = ca.MX.sym('delta')
         p_obs = ca.MX.sym('p_obs', 2 * self.max_obs) # Obstacle positions (lx, ly)
 
         # Objective function: min ||u - u_ref||^2
-        J = ca.sumsqr(u - u_ref)
+        J = ca.sumsqr(u - u_ref) + self.w_slack * delta**2
 
         # Constraints
         g = []
@@ -63,19 +68,19 @@ class CBFController:
             lx = p_obs[2 * i]
             ly = p_obs[2 * i + 1]
             h = lx**2 + ly**2 - self.d_safe**2
-            cbf_constraint = -2 * lx * v + self.gamma * h
+            cbf_constraint = -2 * lx * v + self.gamma * h + delta
             g.append(cbf_constraint)
             lbg.append(0.0)
             ubg.append(ca.inf)
 
         # Create QP solver
-        qp = {'x': u, 'f': J, 'g': ca.vertcat(*g), 'p': ca.vertcat(u_ref, p_obs)}
+        qp = {'x': ca.vertcat(u, delta), 'f': J, 'g': ca.vertcat(*g), 'p': ca.vertcat(u_ref, p_obs)}
         opts = {'ipopt.print_level': 0, 'print_time': 0, 'warn_initial_bounds': False}
         self.solver = ca.nlpsol('solver', 'ipopt', qp, opts)
 
         # Variable and constraint bounds
-        self.lbx = np.array([0.0, -self.w_max])
-        self.ubx = np.array([self.v_max, self.w_max])
+        self.lbx = np.array([0.0, -self.w_max, 0.0])
+        self.ubx = np.array([self.v_max, self.w_max, ca.inf])
         self.lbg = np.array(lbg)
         self.ubg = np.array(ubg)
     # ---------- Nominal Controller ----------
@@ -188,11 +193,10 @@ class CBFController:
 
         # 4. Solve the QP
         p_vec = np.concatenate([u_ref_vec, pobs_vec])
-        sol = self.solver(x0=[v_ref, w_ref], lbx=self.lbx, ubx=self.ubx,
+        sol = self.solver(x0=[v_ref, w_ref, 0.0], lbx=self.lbx, ubx=self.ubx,
                           lbg=self.lbg, ubg=self.ubg, p=p_vec)
         
         u_safe = np.array(sol['x']).ravel()
         v_cmd, w_cmd = float(u_safe[0]), float(u_safe[1])
 
-        # Return command and viz data. Return None for trajectory to match MPC's output signature.
         return v_cmd, w_cmd, None, viz_data
