@@ -12,6 +12,7 @@ class DecentralizedCBFController:
                  w_max: float = 1.0,
                  d_safe: float = 0.1,   # Min safety distance
                  d_max: float = 0.5,    # Max connectivity distance
+                 L: float = 0.05,       # Look-ahead distance
                  max_obs: int = 32,
                  max_agents: int = 5,
                  gamma_avoid: float = 5.0,
@@ -24,6 +25,7 @@ class DecentralizedCBFController:
         self.w_max = w_max
         self.d_safe = d_safe
         self.d_max = d_max
+        self.L = L
         self.max_obs = max_obs
         self.max_agents = max_agents
         self.gamma_avoid = gamma_avoid
@@ -44,18 +46,27 @@ class DecentralizedCBFController:
         p_obs = ca.MX.sym('p_obs', 2 * self.max_obs)
         p_agents = ca.MX.sym('p_agents', 2 * self.max_agents)
         v_agents_local = ca.MX.sym('v_agents_local', 2 * self.max_agents)
+        agent_active = ca.MX.sym('agent_active', self.max_agents)
 
         # Objective
         J = ca.sumsqr(u - u_ref) + self.w_slack * delta_avoid**2
 
         g, lbg, ubg = [], [], []
+        L = self.L # Look-ahead distance
 
         # --- Static Obstacle Constraints ---
         for i in range(self.max_obs):
             lx = p_obs[2 * i]
             ly = p_obs[2 * i + 1]
-            h_avoid = lx**2 + ly**2 - self.d_safe**2
-            g.append(-2 * lx * v + self.gamma_avoid * h_avoid + delta_avoid)
+            
+            # h based on look-ahead point
+            h_avoid = (lx - L)**2 + ly**2 - self.d_safe**2
+            
+            # Lie derivative including w and v
+            Lgh = -2 * L * ly * w - 2 * (lx - L) * v
+            
+            # Full CBF constraint
+            g.append(Lgh + self.gamma_avoid * h_avoid + delta_avoid)
             lbg.append(0.0)
             ubg.append(ca.inf)
 
@@ -65,23 +76,28 @@ class DecentralizedCBFController:
             ly = p_agents[2 * i + 1]
             v_jx_local = v_agents_local[2 * i]
             v_jy_local = v_agents_local[2 * i + 1]
-            p_j_local_dot_v_j_local = lx * v_jx_local + ly * v_jy_local
 
             # 1. Collision Avoidance (min distance) - SOFT
-            h_avoid = lx**2 + ly**2 - self.d_safe**2
-            g.append(-2 * lx * v + 2 * p_j_local_dot_v_j_local + self.gamma_avoid * h_avoid + delta_avoid)
+            h_avoid = (lx - L)**2 + ly**2 - (self.d_safe*2)**2
+            Lfh_avoid = 2 * ((lx - L) * v_jx_local + ly * v_jy_local)
+            Lgh_avoid = -2 * L * ly * w - 2 * (lx - L) * v
+            
+            g.append(agent_active[i] * (Lfh_avoid + Lgh_avoid + self.gamma_avoid * h_avoid + delta_avoid))
             lbg.append(0.0)
             ubg.append(ca.inf)
 
             # 2. Connectivity (max distance) - HARD
-            h_conn = self.d_max**2 - (lx**2 + ly**2)
-            g.append(2 * lx * v - 2 * p_j_local_dot_v_j_local + self.gamma_conn * h_conn)
+            h_conn = (self.d_max*2)**2 - ((lx - L)**2 + ly**2)
+            Lfh_conn = -2 * ((lx - L) * v_jx_local + ly * v_jy_local)
+            Lgh_conn = 2 * L * ly * w + 2 * (lx - L) * v
+
+            g.append(agent_active[i] * (Lfh_conn + Lgh_conn + self.gamma_conn * h_conn))
             lbg.append(0.0)
             ubg.append(ca.inf)
 
         # Create QP solver and a function to evaluate constraints
         qp_vars = ca.vertcat(u, delta_avoid)
-        params = ca.vertcat(u_ref, p_obs, p_agents, v_agents_local)
+        params = ca.vertcat(u_ref, p_obs, p_agents, v_agents_local, agent_active)
         qp = {'x': qp_vars, 'f': J, 'g': ca.vertcat(*g), 'p': params}
         opts = {'ipopt.print_level': 0, 'print_time': 0, 'warn_initial_bounds': False}
         self.solver = ca.nlpsol('solver', 'ipopt', qp, opts)
@@ -120,11 +136,13 @@ class DecentralizedCBFController:
             m = min(self.max_obs, O.shape[0])
             pobs_vec[:2 * m] = O[:m].ravel()
 
-        pagents_vec = np.full(2 * self.max_agents, 1e6, dtype=float)
+        pagents_vec = np.full(2 * self.max_agents, 0.0, dtype=float)
+        agent_active_vec = np.zeros(self.max_agents, dtype=float)
         if other_robots_local:
             A = np.asarray(other_robots_local, dtype=float).reshape(-1, 2)
             m = min(self.max_agents, A.shape[0])
             pagents_vec[:2 * m] = A[:m].ravel()
+            agent_active_vec[:m] = 1.0
 
         vagents_vec = np.zeros(2 * self.max_agents, dtype=float)
         if other_robots_vel_local:
@@ -132,7 +150,7 @@ class DecentralizedCBFController:
             m = min(self.max_agents, V.shape[0])
             vagents_vec[:2 * m] = V[:m].ravel()
 
-        p_vec = np.concatenate([u_ref_vec, pobs_vec, pagents_vec, vagents_vec])
+        p_vec = np.concatenate([u_ref_vec, pobs_vec, pagents_vec, vagents_vec, agent_active_vec])
         x0 = [v_ref, w_ref, 0.0]
         sol = self.solver(x0=x0, lbx=self.lbx, ubx=self.ubx,
                           lbg=self.lbg, ubg=self.ubg, p=p_vec)

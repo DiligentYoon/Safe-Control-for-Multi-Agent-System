@@ -100,7 +100,7 @@ class Simulator:
 
         if self.control_mode == 'decentralized':
             self.controllers = [DecentralizedCBFController(
-                v_max=r.v_max, w_max=r.yaw_rate_max, d_safe=0.1, d_max=0.15, gamma_avoid=2.0, gamma_conn=2.0
+                v_max=r.v_max, w_max=r.yaw_rate_max, d_safe=0.1, d_max=0.15, gamma_avoid=1.0, gamma_conn=2.0
             ) for r in self.robots]
         
         self.target_selectors = [TargetSelector(
@@ -136,7 +136,7 @@ class Simulator:
         half = math.radians(self.sensor.fov_deg * 0.5)
         margin = math.radians(self.fov_edge_margin_deg)
         leader_filtered_local = [p for p in leader_frontier_local if abs(math.atan2(p[1], p[0])) <= (half - margin) and p[0] > 0.0]
-
+        
         leader_p_target_local, leader_viz_data = self.target_selectors[self.leader_idx].pick_target(leader_filtered_local)
         all_viz_data[self.leader_idx] = leader_viz_data
 
@@ -168,9 +168,14 @@ class Simulator:
                 if bel[r, c] == FREE: bel[r, c] = FRONTIER
 
             # --- Set p_target for agent i ---
-            p_target = robot.world_to_local(*p_target_world)
-            if i != self.leader_idx:
-                 all_viz_data[i] = {"target_local": np.asarray(p_target, dtype=float)}
+            # All agents now use the same world target, converted to their local frame
+            if p_target_world:
+                p_target = robot.world_to_local(p_target_world[0], p_target_world[1])
+                # Update the target in the viz data, preserving other viz info like clusters
+                all_viz_data[i]["target_local"] = np.asarray(p_target, dtype=float)
+            else: # Should not happen if simulation stops correctly
+                p_target = (0.0, 0.0)
+                all_viz_data[i]["target_local"] = np.asarray(p_target, dtype=float)
 
             # Get other robots' local positions and velocities
             other_robots_local, other_robots_vel_local = [], []
@@ -226,7 +231,10 @@ class Simulator:
             self.last_clusters_world[agent_idx] = None
 
     def get_viz(self) -> dict:
-        return {"paths": self.paths, "last_cmds": self.last_cmds, "crashed": self.crashed, "crash_msgs": self.crash_msgs, "stopped": self.stopped, "stop_msgs": self.stop_msgs, "targets_world": self.last_targets_world, "clusters_world": self.last_clusters_world}
+        d_safe = self.controllers[0].d_safe if self.controllers else 0
+        d_max = self.controllers[0].d_max if self.controllers else 0
+
+        return {"paths": self.paths, "last_cmds": self.last_cmds, "crashed": self.crashed, "crash_msgs": self.crash_msgs, "stopped": self.stopped, "stop_msgs": self.stop_msgs, "targets_world": self.last_targets_world, "clusters_world": self.last_clusters_world, "d_safe": d_safe, "d_max": d_max}
 
 # ======================================================================================
 # Environment Builder
@@ -238,7 +246,7 @@ def build_minimal_env(num_agents: int = 3):
     # maps.gt[20:80, 50:55] = OCCUPIED # Removed by user request
 
     robots = []
-    start_positions = [(0.2, 0.4), (0.2, 0.5), (0.2, 0.6)]
+    start_positions = [(0.2, 0.3), (0.2, 0.5), (0.2, 0.7)]
     for i in range(num_agents):
         x0, y0 = start_positions[i] if i < len(start_positions) else (0.1, 0.2 + i * 0.2)
         rs, cs = spec.world_to_grid(x0, y0)
@@ -246,5 +254,5 @@ def build_minimal_env(num_agents: int = 3):
         robots.append(Robot(x=wx, y=wy, yaw=0.0))
 
     sensor = RaySensor(fov_deg=80.0, max_range_m=0.5, num_rays=41)
-    sim = Simulator(maps, robots, sensor, dt=0.1, control_mode='decentralized', leader_idx=0)
+    sim = Simulator(maps, robots, sensor, dt=0.1, control_mode='decentralized', leader_idx=1)
     return maps, sim

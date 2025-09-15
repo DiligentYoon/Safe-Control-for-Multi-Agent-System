@@ -62,9 +62,8 @@ def draw_frame(ax_gt, ax_belief, maps, sim):
             ax.add_patch(min_circle)
             
             # Max connectivity distance circle (dotted)
-            if i != sim.leader_idx:
-                max_circle = plt.Circle((cx, cy), radius_max_px, color=color, fill=False, linestyle=':', linewidth=1.2, alpha=0.7)
-                ax.add_patch(max_circle)
+            max_circle = plt.Circle((cx, cy), radius_max_px, color=color, fill=False, linestyle=':', linewidth=1.2, alpha=0.7)
+            ax.add_patch(max_circle)
 
         # --- FOV sector (semi-transparent) ---
         half = math.radians(sim.sensor.fov_deg / 2.0)
@@ -120,7 +119,7 @@ def draw_frame(ax_gt, ax_belief, maps, sim):
 def save_gif(maps, sim, steps: int = 100, out_path: str = 'run.gif', dpi: int = 120):
     import imageio
     frames: List[np.ndarray] = []
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6.5, 6.0))
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12.0, 10.0))
 
     for step_num in range(steps):
         print(f"Step : {step_num + 1} / {steps}")
