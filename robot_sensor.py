@@ -11,6 +11,8 @@ class Robot:
     x: float
     y: float
     yaw: float  # radians
+    vx: float = 0.0 # world frame velocity
+    vy: float = 0.0 # world frame velocity
     v_max: float = 0.3
     yaw_rate_max: float = 1.0
 
@@ -23,6 +25,19 @@ class Robot:
         self.x += v * math.cos(self.yaw) * dt
         self.y += v * math.sin(self.yaw) * dt
         self.yaw = ((self.yaw + yaw_rate * dt + math.pi) % (2 * math.pi)) - math.pi
+        # Update world frame velocity
+        self.vx = v * math.cos(self.yaw)
+        self.vy = v * math.sin(self.yaw)
+
+    def world_to_local(self, wx: float, wy: float) -> Tuple[float, float]:
+        """Transforms a point from world coordinates to the robot's local frame."""
+        dx = wx - self.x
+        dy = wy - self.y
+        c_yaw = math.cos(-self.yaw)
+        s_yaw = math.sin(-self.yaw)
+        lx = dx * c_yaw - dy * s_yaw
+        ly = dx * s_yaw + dy * c_yaw
+        return lx, ly
 
 @dataclass
 class RaySensor:
