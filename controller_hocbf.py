@@ -68,7 +68,7 @@ class DecentralizedHOCBFController:
             h_dot_dot_obs = 2*v_current**2 - 2*w*ly*v_current - 2*lx*a
             psi_2_obs = h_dot_dot_obs + self.gamma_1 * h_dot_obs + self.gamma_2 * psi_1_obs
 
-            g.append(psi_2_obs + delta_avoid)
+            g.append(psi_2_obs)
             lbg.append(0.0)
             ubg.append(ca.inf)
 
@@ -99,7 +99,7 @@ class DecentralizedHOCBFController:
             psi_2_avoid = h_dot_dot_avoid + self.gamma_1 * h_dot_avoid + self.gamma_2 * psi_1_avoid
 
             # Add soft constraint to QP
-            g.append(agent_active[i] * psi_2_avoid)
+            g.append(agent_active[i] * psi_2_avoid + delta_avoid)
             lbg.append(0.0)
             ubg.append(ca.inf)
 
@@ -113,9 +113,7 @@ class DecentralizedHOCBFController:
 
             g.append(agent_active[i] * psi_2_conn)
             lbg.append(0.0)
-            ubg.append(ca.inf)
-
-            
+            ubg.append(ca.inf)         
 
         # Create QP solver
         qp_vars = ca.vertcat(u, delta_avoid)
@@ -149,6 +147,7 @@ class DecentralizedHOCBFController:
         return a_ref, w_ref
 
     def compute_control(self,
+                      is_leader: bool, 
                       p_target: Tuple[float, float],
                       v_current: float, # [HOCBF] Current velocity is now an input
                       obs_local: Optional[List[Tuple[float, float]]],
@@ -157,7 +156,11 @@ class DecentralizedHOCBFController:
                       ) -> Tuple[float, float]:
         
         # [HOCBF] Get nominal acceleration and angular velocity
-        a_ref, w_ref = self._get_nominal_control(p_target, v_current)
+        if is_leader:
+            a_ref, w_ref = self._get_nominal_control(p_target, v_current)
+        else:
+            a_ref, w_ref = 0.0, 0.0
+
         u_ref_vec = np.array([a_ref, w_ref])
 
         pobs_vec = np.full(2 * self.max_obs, 1e6, dtype=float)

@@ -104,7 +104,7 @@ class Simulator:
             #     v_max=r.v_max, w_max=r.yaw_rate_max, d_safe=0.05, d_max=0.3, gamma_avoid=2.0, gamma_conn=2.0
             # ) for r in self.robots]
             self.controllers = [DecentralizedHOCBFController(
-                v_max=r.v_max, w_max=r.yaw_rate_max, d_safe=0.1, d_max=0.3) for r in self.robots]
+                v_max=r.v_max, w_max=r.yaw_rate_max, d_safe=0.1, d_max=0.6) for r in self.robots]
         
         self.target_selectors = [TargetSelector(
             v_max=r.v_max, cluster_radius_m=3 * self.maps.spec.res_m
@@ -157,7 +157,7 @@ class Simulator:
             if self.crashed[i] or self.stopped[i]:
                 commands.append((0.0, 0.0))
                 continue
-
+            is_leader = False 
             robot = self.robots[i]
             
             # All agents need to sense for obstacles
@@ -172,6 +172,7 @@ class Simulator:
             # ---  Set p_target for agent i based on its role ---
             if i == self.leader_idx:
                 # Leader's target is the frontier point, already in its local frame.
+                is_leader = True
                 p_target = leader_p_target_local
             else:
                 # Follower's target is the leader's current position.
@@ -193,7 +194,7 @@ class Simulator:
             if self.control_mode == 'decentralized':
                 # v_cmd, w_cmd = self.controllers[i].compute_control(i, self.leader_idx, p_target, obs_local, other_robots_local, other_robots_vel_local)
                 robot_vel = np.sqrt(robot.vx**2 + robot.vy**2)
-                v_cmd, w_cmd = self.controllers[i].compute_control(p_target, robot_vel, obs_local, other_robots_local, other_robots_vel_local)
+                v_cmd, w_cmd = self.controllers[i].compute_control(is_leader, p_target, robot_vel, obs_local, other_robots_local, other_robots_vel_local)
                 commands.append((v_cmd, w_cmd))
             else:
                 commands.append((0.0, 0.0))
@@ -258,6 +259,6 @@ def build_minimal_env(num_agents: int = 3):
         wx, wy = spec.grid_to_world(rs, cs)
         robots.append(Robot(x=wx, y=wy, yaw=0.0))
 
-    sensor = RaySensor(fov_deg=80.0, max_range_m=0.5, num_rays=41)
+    sensor = RaySensor(fov_deg=120.0, max_range_m=0.3, num_rays=61)
     sim = Simulator(maps, robots, sensor, dt=0.1, control_mode='decentralized', leader_idx=1)
     return maps, sim
