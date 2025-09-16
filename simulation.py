@@ -8,6 +8,7 @@ from typing import List, Tuple, Optional, Dict
 from utils import GridSpec, Maps, FRONTIER, START, OCCUPIED, FREE
 from robot_sensor import Robot, RaySensor
 from controller_cbf import DecentralizedCBFController
+from controller_hocbf import DecentralizedHOCBFController
 
 # ======================================================================================
 # Target Selection Logic
@@ -99,9 +100,11 @@ class Simulator:
         self.stop_msgs = [""] * self.num_agents
 
         if self.control_mode == 'decentralized':
-            self.controllers = [DecentralizedCBFController(
-                v_max=r.v_max, w_max=r.yaw_rate_max, d_safe=0.1, d_max=0.15, gamma_avoid=1.0, gamma_conn=2.0
-            ) for r in self.robots]
+            # self.controllers = [DecentralizedCBFController(
+            #     v_max=r.v_max, w_max=r.yaw_rate_max, d_safe=0.05, d_max=0.3, gamma_avoid=2.0, gamma_conn=2.0
+            # ) for r in self.robots]
+            self.controllers = [DecentralizedHOCBFController(
+                v_max=r.v_max, w_max=r.yaw_rate_max, d_safe=0.1, d_max=0.3) for r in self.robots]
         
         self.target_selectors = [TargetSelector(
             v_max=r.v_max, cluster_radius_m=3 * self.maps.spec.res_m
@@ -144,7 +147,6 @@ class Simulator:
         if leader_p_target_local != (0.0, 0.0):
             p_target_world = self._point_local_to_world(leader_robot, *leader_p_target_local)
 
-        # If there is no target, all agents stop
         if p_target_world is None:
             self.stopped = [True] * self.num_agents
             self.stop_msgs = ["No target from leader."] * self.num_agents
@@ -161,34 +163,37 @@ class Simulator:
             # All agents need to sense for obstacles
             _, frontier_rc, obs_local = self.sensor.sense_and_update(self.maps, robot)
 
-            # Update belief map (can be improved for multi-agent)
+            # Update belief map
             bel = self.maps.belief
             bel[bel == FRONTIER] = FREE
             for r, c in frontier_rc:
                 if bel[r, c] == FREE: bel[r, c] = FRONTIER
 
-            # --- Set p_target for agent i ---
-            # All agents now use the same world target, converted to their local frame
-            if p_target_world:
-                p_target = robot.world_to_local(p_target_world[0], p_target_world[1])
-                # Update the target in the viz data, preserving other viz info like clusters
+            # ---  Set p_target for agent i based on its role ---
+            if i == self.leader_idx:
+                # Leader's target is the frontier point, already in its local frame.
+                p_target = leader_p_target_local
+            else:
+                # Follower's target is the leader's current position.
+                # Convert leader's world position to the follower's local frame.
+                p_target = robot.world_to_local(leader_robot.x, leader_robot.y)
                 all_viz_data[i]["target_local"] = np.asarray(p_target, dtype=float)
-            else: # Should not happen if simulation stops correctly
-                p_target = (0.0, 0.0)
-                all_viz_data[i]["target_local"] = np.asarray(p_target, dtype=float)
-
+            
             # Get other robots' local positions and velocities
             other_robots_local, other_robots_vel_local = [], []
             for j, other_robot in enumerate(self.robots):
                 if i == j: continue
                 lx, ly = robot.world_to_local(other_robot.x, other_robot.y)
+                # Now use the corrected robot.vx, vy attributes
                 lvx, lvy = self._vector_world_to_local(robot, other_robot.vx, other_robot.vy)
                 other_robots_local.append((lx, ly))
                 other_robots_vel_local.append((lvx, lvy))
 
             # Compute control command
             if self.control_mode == 'decentralized':
-                v_cmd, w_cmd = self.controllers[i].compute_control(i, self.leader_idx, p_target, obs_local, other_robots_local, other_robots_vel_local)
+                # v_cmd, w_cmd = self.controllers[i].compute_control(i, self.leader_idx, p_target, obs_local, other_robots_local, other_robots_vel_local)
+                robot_vel = np.sqrt(robot.vx**2 + robot.vy**2)
+                v_cmd, w_cmd = self.controllers[i].compute_control(p_target, robot_vel, obs_local, other_robots_local, other_robots_vel_local)
                 commands.append((v_cmd, w_cmd))
             else:
                 commands.append((0.0, 0.0))
@@ -246,7 +251,7 @@ def build_minimal_env(num_agents: int = 3):
     # maps.gt[20:80, 50:55] = OCCUPIED # Removed by user request
 
     robots = []
-    start_positions = [(0.2, 0.3), (0.2, 0.5), (0.2, 0.7)]
+    start_positions = [(0.2, 0.4), (0.2, 0.5), (0.2, 0.6)]
     for i in range(num_agents):
         x0, y0 = start_positions[i] if i < len(start_positions) else (0.1, 0.2 + i * 0.2)
         rs, cs = spec.world_to_grid(x0, y0)

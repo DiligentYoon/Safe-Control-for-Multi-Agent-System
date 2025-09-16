@@ -53,8 +53,8 @@ def draw_frame(ax_gt, ax_belief, maps, sim):
 
         # --- Safety and Connectivity Circles ---
         cx, cy = world_to_img(robot.x, robot.y)
-        radius_min_px = controller.d_safe / spec.res_m
-        radius_max_px = controller.d_max / spec.res_m
+        radius_min_px = controller.d_safe*0.5 / spec.res_m
+        radius_max_px = controller.d_max*0.5 / spec.res_m
 
         for ax in (ax_gt, ax_belief):
             # Min safety distance circle (dashed)
@@ -64,6 +64,11 @@ def draw_frame(ax_gt, ax_belief, maps, sim):
             # Max connectivity distance circle (dotted)
             max_circle = plt.Circle((cx, cy), radius_max_px, color=color, fill=False, linestyle=':', linewidth=1.2, alpha=0.7)
             ax.add_patch(max_circle)
+
+        # --- Robot Center ---
+        for ax in (ax_gt, ax_belief):
+            center_dot = plt.Circle((cx, cy), 2, color=color, zorder=5)
+            ax.add_patch(center_dot)
 
         # --- FOV sector (semi-transparent) ---
         half = math.radians(sim.sensor.fov_deg / 2.0)
@@ -148,3 +153,58 @@ def save_gif(maps, sim, steps: int = 100, out_path: str = 'run.gif', dpi: int = 
     imageio.mimsave(out_path, frames, fps=int(1.0/sim.dt))
     print("GIF saved.")
     return out_path
+
+def plot_agent_distances(paths: List[List[tuple[float, float]]], d_safe: float, d_max: float, dt: float):
+    """
+    Plots the distances between each agent and all other agents over time.
+
+    Args:
+        paths: A list of paths, where each path is a list of (x, y) tuples.
+        d_safe: The minimum safety distance.
+        d_max: The maximum connectivity distance.
+        dt: The simulation time step.
+    """
+    num_agents = len(paths)
+    if num_agents < 2:
+        print("Not enough agents to plot distances.")
+        return
+
+    # Find the length of the shortest path to determine the number of time steps
+    min_len = min(len(p) for p in paths)
+    timesteps = np.arange(min_len) * dt
+
+    # Create a figure with subplots for each agent
+    fig, axes = plt.subplots(num_agents, 1, figsize=(10, 2 * num_agents), sharex=True)
+    if num_agents == 1:
+        axes = [axes] # Make it iterable
+
+    fig.suptitle('Inter-Agent Distances Over Time', fontsize=16)
+
+    for i in range(num_agents):
+        ax = axes[i]
+        path_i = np.array(paths[i][:min_len])
+
+        for j in range(num_agents):
+            if i == j:
+                continue
+
+            path_j = np.array(paths[j][:min_len])
+            
+            # Calculate the Euclidean distance at each time step
+            distances = np.linalg.norm(path_i - path_j, axis=1)
+            
+            # Plot the distance to agent j
+            ax.plot(timesteps, distances, label=f'Distance to Agent {j}', color=AGENT_COLORS[j % len(AGENT_COLORS)])
+
+        # Plot d_safe and d_max lines
+        ax.axhline(y=d_safe, color='r', linestyle='--', label=f'd_safe ({d_safe}m)')
+        ax.axhline(y=d_max, color='b', linestyle=':', label=f'd_max ({d_max}m)')
+        
+        ax.set_title(f'Agent {i}')
+        ax.set_ylabel('Distance (m)')
+        ax.legend(loc='upper right')
+        ax.grid(True, which='both', linestyle='--', linewidth=0.5)
+
+    axes[-1].set_xlabel('Time (s)')
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    plt.show()

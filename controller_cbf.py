@@ -12,7 +12,7 @@ class DecentralizedCBFController:
                  w_max: float = 1.0,
                  d_safe: float = 0.1,   # Min safety distance
                  d_max: float = 0.5,    # Max connectivity distance
-                 L: float = 0.05,       # Look-ahead distance
+                 L: float = 0.01,       # Look-ahead distance
                  max_obs: int = 32,
                  max_agents: int = 5,
                  gamma_avoid: float = 5.0,
@@ -60,10 +60,10 @@ class DecentralizedCBFController:
             ly = p_obs[2 * i + 1]
             
             # h based on look-ahead point
-            h_avoid = (lx - L)**2 + ly**2 - self.d_safe**2
+            h_avoid = lx**2 + ly**2 - self.d_safe**2
             
             # Lie derivative including w and v
-            Lgh = -2 * L * ly * w - 2 * (lx - L) * v
+            Lgh = -2 * lx * v
             
             # Full CBF constraint
             g.append(Lgh + self.gamma_avoid * h_avoid + delta_avoid)
@@ -78,18 +78,18 @@ class DecentralizedCBFController:
             v_jy_local = v_agents_local[2 * i + 1]
 
             # 1. Collision Avoidance (min distance) - SOFT
-            h_avoid = (lx - L)**2 + ly**2 - (self.d_safe*2)**2
-            Lfh_avoid = 2 * ((lx - L) * v_jx_local + ly * v_jy_local)
-            Lgh_avoid = -2 * L * ly * w - 2 * (lx - L) * v
+            h_avoid = lx**2 + ly**2 - self.d_safe**2
+            Lfh_avoid =  2 * (lx * v_jx_local + ly * v_jy_local)
+            Lgh_avoid = -2 * lx * v
             
-            g.append(agent_active[i] * (Lfh_avoid + Lgh_avoid + self.gamma_avoid * h_avoid + delta_avoid))
+            g.append(agent_active[i] * (Lfh_avoid + Lgh_avoid + self.gamma_avoid * h_avoid))
             lbg.append(0.0)
             ubg.append(ca.inf)
 
             # 2. Connectivity (max distance) - HARD
-            h_conn = (self.d_max*2)**2 - ((lx - L)**2 + ly**2)
-            Lfh_conn = -2 * ((lx - L) * v_jx_local + ly * v_jy_local)
-            Lgh_conn = 2 * L * ly * w + 2 * (lx - L) * v
+            h_conn = (self.d_max)**2 - (lx**2 + ly**2)
+            Lfh_conn = -2 * (lx * v_jx_local + ly * v_jy_local)
+            Lgh_conn =  2 * lx * v
 
             g.append(agent_active[i] * (Lfh_conn + Lgh_conn + self.gamma_conn * h_conn))
             lbg.append(0.0)
