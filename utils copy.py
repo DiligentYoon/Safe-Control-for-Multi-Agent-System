@@ -3,6 +3,63 @@ import imageio
 import os
 
 
+def get_cell_position_from_coords(coords, map_info, check_negative=True):
+    """
+        coords: array-like of shape (2,) or (N,2) in world [x, y] coordinates
+        map_info: MapInfo 객체 (map, map_origin_x, map_origin_y, cell_size)
+        check_negative: True일 경우, boundary 밖으로 나간 인덱스를 자동으로 클램핑
+    """
+    # 1) 입력 형태 정리
+    single_cell = False
+    coords = np.asarray(coords)
+    if coords.ndim == 1 and coords.size == 2:
+        single_cell = True
+        coords = coords.reshape(1, 2)
+    else:
+        coords = coords.reshape(-1, 2)
+
+    # 2) world → fractional cell 좌표
+    coords_x = coords[:, 0]
+    coords_y = coords[:, 1]
+    H, W = map_info.map.shape
+
+    # y 축 뒤집기: 맵 row 0이 하단(origin_y)에 대응하도록
+    frac_x = (coords_x - map_info.map_origin_x) / map_info.cell_size
+    frac_y = H - 1 - ((coords_y - map_info.map_origin_y) / map_info.cell_size)
+
+    # 3) 내림 처리하여 정수 인덱스로 변환
+    cell_position = np.floor(
+        np.stack((frac_x, frac_y), axis=-1)
+    ).astype(int)
+
+    # 4) boundary 클램핑 (optional)
+    if check_negative:
+        cell_position[:, 0] = np.clip(cell_position[:, 0], 0, W - 1)
+        cell_position[:, 1] = np.clip(cell_position[:, 1], 0, H - 1)
+
+    # 5) 반환 형태 맞추기
+    if single_cell:
+        return cell_position[0]
+    return cell_position
+
+
+def get_coords_from_cell_position(cell_position, map_info):
+    cell_position = cell_position.reshape(-1, 2)
+    cell_x = cell_position[:, 0]
+    H = map_info.map.shape[0]
+    cell_y = H - 1 - cell_position[:, 1]
+
+    coords_x = cell_x * map_info.cell_size + map_info.map_origin_x
+    coords_y = cell_y * map_info.cell_size + map_info.map_origin_y
+    coords = np.stack((coords_x, coords_y), axis=-1)
+    coords = np.around(coords, 1)
+    if coords.shape[0] == map_info.map_mask["occupied"]:
+
+        return coords[0]
+    else:
+        return coords
+
+
 def collision_check(x0, y0, x1, y1, ground_truth, robot_belief, map_mask):
     """
     Ray-cast from (x0,y0) to (x1,y1) in cell coordinates.
@@ -81,6 +138,19 @@ def bresenham_line(x0, y0, x1, y1):
             err += dx
             y += sy
 
+
+def sensor_work(robot_position, sensor_range, robot_belief, ground_truth):
+    sensor_angle_inc = 0.5 / 180 * np.pi
+    sensor_angle = 0
+    x0 = robot_position[0]
+    y0 = robot_position[1]
+    while sensor_angle < 2 * np.pi:
+        x1 = x0 + np.cos(sensor_angle) * sensor_range
+        y1 = y0 + np.sin(sensor_angle) * sensor_range
+        robot_belief = collision_check(x0, y0, x1, y1, ground_truth, robot_belief)
+        sensor_angle += sensor_angle_inc
+    return robot_belief
+
 def normalize_angle(angle):
     """Normalize an angle to be within [0, 360) degrees."""
     return angle % 360
@@ -137,7 +207,7 @@ def sensor_work_heading(robot_position,
                         fov,
                         map_mask):
 
-    sensor_angle_inc = 2.0
+    sensor_angle_inc = 1.0
     x0 = robot_position[0]
     y0 = robot_position[1]
     start_angle, end_angle = calculate_fov_boundaries(heading, fov)
@@ -155,3 +225,27 @@ def sensor_work_heading(robot_position,
         robot_belief = collision_check(x0, y0, x1, y1, ground_truth, robot_belief, map_mask)
 
     return robot_belief
+
+
+
+
+
+
+def make_gif(path, n, frame_files, rate):
+    with imageio.get_writer('{}/{}_explored_rate_{:.4g}.gif'.format(path, n, rate), mode='I', duration=1) as writer:
+        for frame in frame_files:
+            image = imageio.imread(frame)
+            writer.append_data(image)
+    print('gif complete\n')
+
+    for filename in frame_files[:-1]:
+        os.remove(filename)
+
+def make_gif_test(path, n, frame_files, rate, n_agents, fov, sensor_range):
+    with imageio.get_writer('{}/{}_{}_{}_{}_explored_rate_{:.4g}.gif'.format(path, n, n_agents, fov, sensor_range, rate), mode='I', duration=1) as writer:
+        for frame in frame_files:
+            image = imageio.imread(frame)
+            writer.append_data(image)
+    print('gif complete\n')
+    for filename in frame_files[:-1]:
+        os.remove(filename)
