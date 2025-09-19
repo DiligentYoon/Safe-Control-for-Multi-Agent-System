@@ -10,17 +10,17 @@ class DecentralizedHOCBFController:
     def __init__(self,
                  v_max: float = 0.3,
                  w_max: float = 1.0,
-                 a_max: float = 0.5,      # [HOCBF] Max linear acceleration
-                 d_safe: float = 0.1,   # Min safety distance
+                 a_max: float = 0.5,     
+                 d_safe: float = 0.1,   
                  d_max: float = 0.2,
                  max_obs: int = 32,
                  max_agents: int = 5,
-                 gamma_1: float = 3.0,    # [HOCBF] gamma_1 parameter for HOCBF
-                 gamma_2: float = 4.0,    # [HOCBF] gamma_2 parameter for HOCBF
-                 w_slack: float = 1e+6,
+                 stiffness: float = 6.0,
+                 damping: float = 5.0,
+                 w_slack: float = 10000,
                  k_v: float = 1.5,
-                 k_w: float = 2.5,
-                 dt: float = 0.1,         # [HOCBF] Timestep needed for constraints
+                 k_w: float = 1.0,
+                 dt: float = 0.1,   
                  ):
         self.v_max = v_max
         self.w_max = w_max
@@ -29,8 +29,8 @@ class DecentralizedHOCBFController:
         self.d_max = d_max
         self.max_obs = max_obs
         self.max_agents = max_agents
-        self.gamma_1 = gamma_1
-        self.gamma_2 = gamma_2
+        self.damping = damping
+        self.stiffness = stiffness
         self.w_slack = w_slack
         self.k_v = k_v
         self.k_w = k_w
@@ -57,18 +57,17 @@ class DecentralizedHOCBFController:
 
         g, lbg, ubg = [], [], []
 
-        # --- Static Obstacle Constraints (1st Order CBF, adapted for acceleration control) ---
+        # --- Soft Static Obstacle Constraints (1st Order CBF, adapted for acceleration control) ---
         for i in range(self.max_obs):
             lx = p_obs[2 * i]
             ly = p_obs[2 * i + 1]
             h_obs = lx**2 + ly**2 - self.d_safe**2 # Simplified h for static obs
             h_dot_obs = -2 * lx * v_current
-            psi_1_obs = h_dot_obs + self.gamma_1 * h_obs
-
             h_dot_dot_obs = 2*v_current**2 - 2*w*ly*v_current - 2*lx*a
-            psi_2_obs = h_dot_dot_obs + self.gamma_1 * h_dot_obs + self.gamma_2 * psi_1_obs
 
-            g.append(psi_2_obs)
+            psi_2_obs = h_dot_dot_obs + self.damping * h_dot_obs + self.stiffness * h_obs
+
+            g.append(psi_2_obs + delta_avoid)
             lbg.append(0.0)
             ubg.append(ca.inf)
 
@@ -79,37 +78,31 @@ class DecentralizedHOCBFController:
             v_jx_local = v_agents_local[2 * i]
             v_jy_local = v_agents_local[2 * i + 1]
             
-            # --- 1. Collision Avoidance (min distance) - SOFT ---
+            # --- 1. Collision Avoidance (min distance) - 임시 HARD, SOFT로 변경 예정 -
             # [HOCBF] Define h, h_dot_avoid, and psi_1_avoid for the agent
             h_avoid = lx**2 + ly**2 - self.d_safe**2
             h_dot_avoid = -2 * lx * v_current + 2 * (lx * v_jx_local + ly * v_jy_local)
-            psi_1_avoid = h_dot_avoid + self.gamma_1 * h_avoid
-            
             # [HOCBF] Calculate h_dot_dot_avoid assuming other agent's acceleration is zero
             # d/dt(-2*lx*v) -> 2*v^2 - 2*w*ly*v - 2*lx*a
-            h_dot_dot_self_avoid = 2*v_current**2 - 2*w*ly*v_current - 2*lx*a
-            
-            # d/dt(2*(lx*v_jx + ly*v_jy)) -> See previous derivation
+            h_dot_dot_self_avoid = 2*v_current**2 - 2*w*ly*v_current - 2*lx*a - 2*v_current*v_jx_local
             v_dot_p = -v_current * v_jx_local + w * ly * v_jx_local + v_jx_local**2 - w * lx * v_jy_local + v_jy_local**2
             h_dot_dot_other_avoid = 2 * v_dot_p
-            
             h_dot_dot_avoid = h_dot_dot_self_avoid + h_dot_dot_other_avoid
 
-            # [HOCBF] Final psi_2_avoid constraint: h_dot_dot_avoid + gamma_1 + h_dot_avoid + gamma_2 * psi_1_avoid >= 0
-            psi_2_avoid = h_dot_dot_avoid + self.gamma_1 * h_dot_avoid + self.gamma_2 * psi_1_avoid
+            psi_2_avoid = h_dot_dot_avoid + self.damping * h_dot_avoid + self.stiffness * h_avoid
 
             # Add soft constraint to QP
-            g.append(agent_active[i] * psi_2_avoid + delta_avoid)
+            g.append(agent_active[i] * psi_2_avoid)
             lbg.append(0.0)
             ubg.append(ca.inf)
 
-            # --- 2. Connectivity (max distance) - HARD ---
+            # --- 2. Connectivity (max distance) - HARD -
             h_conn = self.d_max**2 - (lx**2 + ly**2)
             h_dot_conn = -h_dot_avoid 
             # h_dot_dot_conn은 h_dot_dot_avoid의 부호 반대
             h_dot_dot_conn = -h_dot_dot_avoid
-            psi_1_conn = h_dot_conn + self.gamma_1 * h_conn
-            psi_2_conn = h_dot_dot_conn + self.gamma_1 * h_dot_conn + self.gamma_2 * psi_1_conn
+
+            psi_2_conn = h_dot_dot_conn + self.damping * h_dot_conn + self.stiffness * h_conn
 
             g.append(agent_active[i] * psi_2_conn)
             lbg.append(0.0)
@@ -121,6 +114,9 @@ class DecentralizedHOCBFController:
         qp = {'x': qp_vars, 'f': J, 'g': ca.vertcat(*g), 'p': params}
         opts = {'ipopt.print_level': 0, 'print_time': 0, 'warn_initial_bounds': False}
         self.solver = ca.nlpsol('solver', 'ipopt', qp, opts)
+
+        # Add a function to evaluate the constraints for debugging
+        self.eval_g = ca.Function('eval_g', [qp_vars, params], [ca.vertcat(*g)], ['x', 'p'], ['g'])
         
         # [HOCBF] Update variable bounds for [a, w, delta]
         self.lbx = np.array([-self.a_max, -self.w_max, 0.0])
@@ -147,20 +143,15 @@ class DecentralizedHOCBFController:
         return a_ref, w_ref
 
     def compute_control(self,
-                      is_leader: bool, 
-                      p_target: Tuple[float, float],
-                      v_current: float, # [HOCBF] Current velocity is now an input
-                      obs_local: Optional[List[Tuple[float, float]]],
-                      other_robots_local: Optional[List[Tuple[float, float]]],
-                      other_robots_vel_local: Optional[List[Tuple[float, float]]]
-                      ) -> Tuple[float, float]:
+                        p_target: Tuple[float, float],
+                        v_current: float, # [HOCBF] Current velocity is now an input
+                        obs_local: Optional[List[Tuple[float, float]]],
+                        other_robots_local: Optional[List[Tuple[float, float]]],
+                        other_robots_vel_local: Optional[List[Tuple[float, float]]]
+                        ) -> Tuple[float, float, float, float, dict]:
         
         # [HOCBF] Get nominal acceleration and angular velocity
-        if is_leader:
-            a_ref, w_ref = self._get_nominal_control(p_target, v_current)
-        else:
-            a_ref, w_ref = 0.0, 0.0
-
+        a_ref, w_ref = self._get_nominal_control(p_target, v_current)
         u_ref_vec = np.array([a_ref, w_ref])
 
         pobs_vec = np.full(2 * self.max_obs, 1e6, dtype=float)
@@ -196,4 +187,37 @@ class DecentralizedHOCBFController:
         v_cmd = v_current + a_cmd * self.dt
         v_cmd = np.clip(v_cmd, 0.0, self.v_max)
 
-        return v_cmd, w_cmd
+        # Return nominal and safe inputs
+        v_ref_integrated = v_current + a_ref * self.dt
+        v_ref_integrated = np.clip(v_ref_integrated, 0.0, self.v_max)
+        
+        # --- CBF & HOCBF Value Calculation for Visualization ---
+        cbf_values = {}
+        if obs_local:
+            O = np.asarray(obs_local, dtype=float).reshape(-1, 2)
+            h_obs = np.linalg.norm(O, axis=1)**2 - self.d_safe**2
+            cbf_values['obs_avoid'] = h_obs
+
+        if other_robots_local:
+            A = np.asarray(other_robots_local, dtype=float).reshape(-1, 2)
+            dists_sq = np.linalg.norm(A, axis=1)**2
+            cbf_values['agent_avoid'] = dists_sq - self.d_safe**2
+            cbf_values['agent_conn'] = self.d_max**2 - dists_sq
+
+            # Also get the full psi values from the solver
+            g_val = self.eval_g(x=sol['x'], p=p_vec)['g']
+            agent_g_values = g_val[self.max_obs:]
+            
+            psi_avoids = []
+            psi_conns = []
+            for i in range(self.max_agents):
+                if agent_active_vec[i] > 0:
+                    psi_avoids.append(float(agent_g_values[2*i]))
+                    psi_conns.append(float(agent_g_values[2*i+1]))
+            
+            if psi_avoids:
+                cbf_values['psi_agent_avoid'] = np.array(psi_avoids)
+            if psi_conns:
+                cbf_values['psi_agent_conn'] = np.array(psi_conns)
+
+        return v_cmd, w_cmd, v_ref_integrated, w_ref, cbf_values

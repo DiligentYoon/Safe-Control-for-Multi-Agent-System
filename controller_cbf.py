@@ -12,11 +12,11 @@ class DecentralizedCBFController:
                  w_max: float = 1.0,
                  d_safe: float = 0.1,   # Min safety distance
                  d_max: float = 0.5,    # Max connectivity distance
-                 L: float = 0.01,       # Look-ahead distance
                  max_obs: int = 32,
                  max_agents: int = 5,
                  gamma_avoid: float = 5.0,
                  gamma_conn: float = 1.0,
+
                  w_slack: float = 100000.0, # Increased slack penalty for avoidance
                  k_v: float = 1.5,
                  k_w: float = 2.5,
@@ -25,14 +25,13 @@ class DecentralizedCBFController:
         self.w_max = w_max
         self.d_safe = d_safe
         self.d_max = d_max
-        self.L = L
         self.max_obs = max_obs
         self.max_agents = max_agents
         self.gamma_avoid = gamma_avoid
         self.gamma_conn = gamma_conn
         self.w_slack = w_slack
         self.k_v = k_v
-        self.k_w = k_w
+        self.k_w = k_w 
         self._build_qp()
 
     def _build_qp(self):
@@ -54,7 +53,7 @@ class DecentralizedCBFController:
         g, lbg, ubg = [], [], []
         L = self.L # Look-ahead distance
 
-        # --- Static Obstacle Constraints ---
+        # --- Soft Static Obstacle Constraints ---
         for i in range(self.max_obs):
             lx = p_obs[2 * i]
             ly = p_obs[2 * i + 1]
@@ -77,7 +76,7 @@ class DecentralizedCBFController:
             v_jx_local = v_agents_local[2 * i]
             v_jy_local = v_agents_local[2 * i + 1]
 
-            # 1. Collision Avoidance (min distance) - SOFT
+            # 1. Collision Avoidance (min distance) - 임시로 HARD (Soft로 변경 에정)
             h_avoid = lx**2 + ly**2 - self.d_safe**2
             Lfh_avoid =  2 * (lx * v_jx_local + ly * v_jy_local)
             Lgh_avoid = -2 * lx * v
@@ -125,7 +124,7 @@ class DecentralizedCBFController:
              obs_local: Optional[List[Tuple[float, float]]],
              other_robots_local: Optional[List[Tuple[float, float]]],
              other_robots_vel_local: Optional[List[Tuple[float, float]]]
-             ) -> Tuple[float, float]:
+             ) -> Tuple[float, float, dict]:
         
         v_ref, w_ref = self._get_nominal_control(p_target)
         u_ref_vec = np.array([v_ref, w_ref])
@@ -158,15 +157,18 @@ class DecentralizedCBFController:
         u_safe = np.array(sol['x']).ravel()
         v_cmd, w_cmd = float(u_safe[0]), float(u_safe[1])
 
-        # --- DEBUGGING BLOCK ---
-        # if agent_idx != leader_idx:
-        #     g_val = self.eval_g(x=sol['x'], p=p_vec)['g']
-        #     print(f"""--- Follower {agent_idx} Debug ---
-        #     Target (local): {p_target[0]:.2f}, {p_target[1]:.2f}
-        #     u_ref: v={v_ref:.2f}, w={w_ref:.2f}
-        #     u_sol: v={v_cmd:.2f}, w={w_cmd:.2f}
-        #     Constraints (g):
-        #     {g_val}
-        #     """)
+        # --- CBF Value Calculation for Visualization ---
+        cbf_values = {}
+        if obs_local:
+            O = np.asarray(obs_local, dtype=float).reshape(-1, 2)
+            h_obs = np.linalg.norm(O, axis=1)**2 - self.d_safe**2
+            cbf_values['obs_avoid'] = h_obs
 
-        return v_cmd, w_cmd
+        if other_robots_local:
+            A = np.asarray(other_robots_local, dtype=float).reshape(-1, 2)
+            h_agent_avoid = np.linalg.norm(A, axis=1)**2 - self.d_safe**2
+            h_agent_conn = self.d_max**2 - np.linalg.norm(A, axis=1)**2
+            cbf_values['agent_avoid'] = h_agent_avoid
+            cbf_values['agent_conn'] = h_agent_conn
+
+        return v_cmd, w_cmd, cbf_values

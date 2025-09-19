@@ -94,17 +94,17 @@ class Simulator:
 
         self.paths = [[(r.x, r.y)] for r in self.robots]
         self.last_cmds = [(0.0, 0.0)] * self.num_agents
+        self.nominal_inputs_history = [[] for _ in range(self.num_agents)]
+        self.safe_inputs_history = [[] for _ in range(self.num_agents)]
+        self.cbf_values_history = [[] for _ in range(self.num_agents)] # To store h values
         self.crashed = [False] * self.num_agents
         self.crash_msgs = [""] * self.num_agents
         self.stopped = [False] * self.num_agents
         self.stop_msgs = [""] * self.num_agents
 
         if self.control_mode == 'decentralized':
-            # self.controllers = [DecentralizedCBFController(
-            #     v_max=r.v_max, w_max=r.yaw_rate_max, d_safe=0.05, d_max=0.3, gamma_avoid=2.0, gamma_conn=2.0
-            # ) for r in self.robots]
             self.controllers = [DecentralizedHOCBFController(
-                v_max=r.v_max, w_max=r.yaw_rate_max, d_safe=0.1, d_max=0.6) for r in self.robots]
+                v_max=r.v_max, w_max=r.yaw_rate_max, d_safe=0.1, d_max=0.3) for r in self.robots]
         
         self.target_selectors = [TargetSelector(
             v_max=r.v_max, cluster_radius_m=3 * self.maps.spec.res_m
@@ -157,7 +157,6 @@ class Simulator:
             if self.crashed[i] or self.stopped[i]:
                 commands.append((0.0, 0.0))
                 continue
-            is_leader = False 
             robot = self.robots[i]
             
             # All agents need to sense for obstacles
@@ -171,13 +170,15 @@ class Simulator:
 
             # ---  Set p_target for agent i based on its role ---
             if i == self.leader_idx:
-                # Leader's target is the frontier point, already in its local frame.
-                is_leader = True
                 p_target = leader_p_target_local
             else:
                 # Follower's target is the leader's current position.
                 # Convert leader's world position to the follower's local frame.
-                p_target = robot.world_to_local(leader_robot.x, leader_robot.y)
+                if i == 0:
+                    p_target = robot.world_to_local(leader_robot.x-0.02, leader_robot.y-0.02)
+                else:
+                    p_target = robot.world_to_local(leader_robot.x-0.02, leader_robot.y+0.02)
+            
                 all_viz_data[i]["target_local"] = np.asarray(p_target, dtype=float)
             
             # Get other robots' local positions and velocities
@@ -192,10 +193,12 @@ class Simulator:
 
             # Compute control command
             if self.control_mode == 'decentralized':
-                # v_cmd, w_cmd = self.controllers[i].compute_control(i, self.leader_idx, p_target, obs_local, other_robots_local, other_robots_vel_local)
                 robot_vel = np.sqrt(robot.vx**2 + robot.vy**2)
-                v_cmd, w_cmd = self.controllers[i].compute_control(is_leader, p_target, robot_vel, obs_local, other_robots_local, other_robots_vel_local)
+                v_cmd, w_cmd, v_ref, w_ref, cbf_values = self.controllers[i].compute_control(p_target, robot_vel, obs_local, other_robots_local, other_robots_vel_local)
                 commands.append((v_cmd, w_cmd))
+                self.nominal_inputs_history[i].append((v_ref, w_ref))
+                self.safe_inputs_history[i].append((v_cmd, w_cmd))
+                self.cbf_values_history[i].append(cbf_values)
             else:
                 commands.append((0.0, 0.0))
 
@@ -240,7 +243,21 @@ class Simulator:
         d_safe = self.controllers[0].d_safe if self.controllers else 0
         d_max = self.controllers[0].d_max if self.controllers else 0
 
-        return {"paths": self.paths, "last_cmds": self.last_cmds, "crashed": self.crashed, "crash_msgs": self.crash_msgs, "stopped": self.stopped, "stop_msgs": self.stop_msgs, "targets_world": self.last_targets_world, "clusters_world": self.last_clusters_world, "d_safe": d_safe, "d_max": d_max}
+        return {
+            "paths": self.paths, 
+            "last_cmds": self.last_cmds, 
+            "crashed": self.crashed, 
+            "crash_msgs": self.crash_msgs, 
+            "stopped": self.stopped, 
+            "stop_msgs": self.stop_msgs, 
+            "targets_world": self.last_targets_world, 
+            "clusters_world": self.last_clusters_world, 
+            "d_safe": d_safe, 
+            "d_max": d_max,
+            "nominal_inputs_history": self.nominal_inputs_history,
+            "safe_inputs_history": self.safe_inputs_history,
+            "cbf_values_history": self.cbf_values_history
+        }
 
 # ======================================================================================
 # Environment Builder

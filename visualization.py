@@ -154,7 +154,7 @@ def save_gif(maps, sim, steps: int = 100, out_path: str = 'run.gif', dpi: int = 
     print("GIF saved.")
     return out_path
 
-def plot_agent_distances(paths: List[List[tuple[float, float]]], d_safe: float, d_max: float, dt: float):
+def plot_agent_distances(paths: List[List[tuple[float, float]]], d_safe: float, d_max: float, dt: float, save_path: str = None):
     """
     Plots the distances between each agent and all other agents over time.
 
@@ -163,6 +163,7 @@ def plot_agent_distances(paths: List[List[tuple[float, float]]], d_safe: float, 
         d_safe: The minimum safety distance.
         d_max: The maximum connectivity distance.
         dt: The simulation time step.
+        save_path: If provided, saves the plot to this file path.
     """
     num_agents = len(paths)
     if num_agents < 2:
@@ -207,4 +208,154 @@ def plot_agent_distances(paths: List[List[tuple[float, float]]], d_safe: float, 
 
     axes[-1].set_xlabel('Time (s)')
     plt.tight_layout(rect=[0, 0, 1, 0.96])
-    plt.show()
+    
+    if save_path:
+        plt.savefig(save_path)
+        print(f"Saved agent distance plot to {save_path}")
+        plt.close(fig)
+    else:
+        plt.show()
+
+def plot_control_inputs(nominal_history, safe_history, dt, num_agents, save_path: str = None):
+    """
+    Plots nominal vs. safe control inputs (v and w) for each agent.
+    """
+    if not nominal_history or not safe_history:
+        print("No control history to plot.")
+        return
+
+    timesteps = np.arange(len(nominal_history[0])) * dt
+    
+    fig, axes = plt.subplots(num_agents, 2, figsize=(12, 3 * num_agents), sharex=True)
+    if num_agents == 1:
+        axes = np.array([axes]) # Make it indexable
+
+    fig.suptitle('Nominal vs. Safe Control Inputs', fontsize=16)
+
+    for i in range(num_agents):
+        nom_v, nom_w = zip(*nominal_history[i])
+        safe_v, safe_w = zip(*safe_history[i])
+
+        # Plot Linear Velocity (v)
+        ax_v = axes[i, 0]
+        ax_v.plot(timesteps, nom_v, 'b--', label='v_nominal')
+        ax_v.plot(timesteps, safe_v, 'b-', label='v_safe')
+        ax_v.set_title(f'Agent {i} - Linear Velocity')
+        ax_v.set_ylabel('v (m/s)')
+        ax_v.legend()
+        ax_v.grid(True, which='both', linestyle='--', linewidth=0.5)
+
+        # Plot Angular Velocity (w)
+        ax_w = axes[i, 1]
+        ax_w.plot(timesteps, nom_w, 'r--', label='w_nominal')
+        ax_w.plot(timesteps, safe_w, 'r-', label='w_safe')
+        ax_w.set_title(f'Agent {i} - Angular Velocity')
+        ax_w.set_ylabel('w (rad/s)')
+        ax_w.legend()
+        ax_w.grid(True, which='both', linestyle='--', linewidth=0.5)
+
+    axes[-1, 0].set_xlabel('Time (s)')
+    axes[-1, 1].set_xlabel('Time (s)')
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    
+    if save_path:
+        plt.savefig(save_path)
+        print(f"Saved control input plot to {save_path}")
+        plt.close(fig)
+    else:
+        plt.show()
+
+def plot_cbf_values(cbf_history: List[List[dict]], dt: float, num_agents: int, save_path: str = None):
+    """
+    Plots the CBF 'h' values for each agent over time.
+    """
+    if not cbf_history or not cbf_history[0]:
+        print("No CBF history to plot.")
+        return
+
+    min_len = min(len(h) for h in cbf_history)
+    timesteps = np.arange(min_len) * dt
+
+    fig, axes = plt.subplots(num_agents, 1, figsize=(12, 3 * num_agents), sharex=True)
+    if num_agents == 1:
+        axes = [axes]
+
+    fig.suptitle('Control Barrier Function (h) Values Over Time', fontsize=16)
+
+    for i in range(num_agents):
+        ax = axes[i]
+        history_i = cbf_history[i][:min_len]
+
+        # Extract the minimum h-value for each CBF type at each timestep
+        h_obs_avoid = [min(h.get('obs_avoid', [0])) if h.get('obs_avoid') is not None and len(h.get('obs_avoid')) > 0 else 0 for h in history_i]
+        h_agent_avoid = [min(h.get('agent_avoid', [0])) if h.get('agent_avoid') is not None and len(h.get('agent_avoid')) > 0 else 0 for h in history_i]
+        h_agent_conn = [min(h.get('agent_conn', [0])) if h.get('agent_conn') is not None and len(h.get('agent_conn')) > 0 else 0 for h in history_i]
+
+        ax.plot(timesteps, h_obs_avoid, label='h_obs_avoid (min)', linestyle='-')
+        ax.plot(timesteps, h_agent_avoid, label='h_agent_avoid (min)', linestyle='--')
+        ax.plot(timesteps, h_agent_conn, label='h_agent_conn (min)', linestyle=':')
+
+        ax.axhline(y=0, color='r', linestyle='-', linewidth=1.5, label='h=0 (Safety Boundary)')
+        
+        ax.set_title(f'Agent {i}')
+        ax.set_ylabel('h value')
+        ax.legend()
+        ax.grid(True, which='both', linestyle='--', linewidth=0.5)
+        ax.set_ylim(bottom=-0.1) # Start y-axis just below 0
+
+    axes[-1].set_xlabel('Time (s)')
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+
+    if save_path:
+        plt.savefig(save_path)
+        print(f"Saved CBF values plot to {save_path}")
+        plt.close(fig)
+    else:
+        plt.show()
+
+def plot_psi_values(cbf_history: List[List[dict]], dt: float, num_agents: int, save_path: str = None):
+    """
+    Plots the HOCBF 'psi' values (the QP constraints) for each agent over time.
+    """
+    if not cbf_history or not cbf_history[0]:
+        print("No HOCBF (psi) history to plot.")
+        return
+
+    min_len = min(len(h) for h in cbf_history)
+    timesteps = np.arange(min_len) * dt
+
+    fig, axes = plt.subplots(num_agents, 1, figsize=(12, 3 * num_agents), sharex=True)
+    if num_agents == 1:
+        axes = [axes]
+
+    fig.suptitle('HOCBF Constraint (psi) Values Over Time', fontsize=16)
+
+    for i in range(num_agents):
+        ax = axes[i]
+        history_i = cbf_history[i][:min_len]
+
+        # Extract the minimum psi-value for each constraint type at each timestep
+        psi_agent_avoid = [min(h.get('psi_agent_avoid', [0])) if h.get('psi_agent_avoid') is not None and len(h.get('psi_agent_avoid')) > 0 else 0 for h in history_i]
+        psi_agent_conn = [min(h.get('psi_agent_conn', [0])) if h.get('psi_agent_conn') is not None and len(h.get('psi_agent_conn')) > 0 else 0 for h in history_i]
+
+        ax.plot(timesteps, psi_agent_avoid, label='psi_agent_avoid (min)', linestyle='--')
+        ax.plot(timesteps, psi_agent_conn, label='psi_agent_conn (min)', linestyle=':')
+
+        ax.axhline(y=0, color='r', linestyle='-', linewidth=1.5, label='psi=0 (Constraint Boundary)')
+        
+        ax.set_title(f'Agent {i}')
+        ax.set_ylabel('psi value')
+        ax.legend()
+        ax.grid(True, which='both', linestyle='--', linewidth=0.5)
+        ax.set_ylim(bottom=-0.5) # Start y-axis just below 0 to see violations clearly
+
+    axes[-1].set_xlabel('Time (s)')
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+
+    if save_path:
+        plt.savefig(save_path)
+        print(f"Saved HOCBF psi values plot to {save_path}")
+        plt.close(fig)
+    else:
+        plt.show()
+
