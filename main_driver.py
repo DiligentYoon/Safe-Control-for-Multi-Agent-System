@@ -89,7 +89,8 @@ class MainDriver:
         model_cfg = self.cfg['model']
 
         # Feature Extractor
-        feature_extractor = GNN_Feature_Extractor(obs_dim, model_cfg['feature_extractor'])
+        global_feature_extractor = GNN_Feature_Extractor(state_dim, model_cfg['feature_extractor'])
+        local_feature_extractor = GNN_Feature_Extractor(obs_dim, model_cfg['feature_extractor'])
 
         actor_type = model_cfg['actor']['type']
         if actor_type == "Gaussian":
@@ -99,11 +100,13 @@ class MainDriver:
             ValueError("[INFO] TODO : we should construct the deterministic policy for MADDPG ...")
     
         # Centralized critic input dimension: state + agent actions
-        critic_input_dim = model_cfg['feature_extractor']['hidden'] + action_dim
+        critic_input_dim = model_cfg['feature_extractor']['hidden']
         critic1 = CriticDeterministicNet(critic_input_dim, 1, self.device, model_cfg['critic'])
         critic2 = CriticDeterministicNet(critic_input_dim, 1, self.device, model_cfg['critic'])
         
-        return {"policy": policy, 
+        return {"policy_feature_exractor": local_feature_extractor,
+                "value_feature_extractor": global_feature_extractor,
+                "policy": policy, 
                 "value_1": critic1, 
                 "value_2": critic2}
 

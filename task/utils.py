@@ -1,4 +1,14 @@
 import numpy as np
+import torch
+
+from torch_geometric.data import Data, Batch
+
+def obs_to_graph(self, obs, device):
+    graph_features = torch.tensor(obs['graph_features'], dtype=torch.float, device=self.device)
+    edge_index = torch.tensor(obs['edge_index'], dtype=torch.long, device=self.device)
+    data = Batch.from_data_list([Data(x=graph_features, edge_index=edge_index)])
+    data = data.to(device)
+    return data
 
 
 def create_fully_connected_edges(num_agent:int) -> np.ndarray:

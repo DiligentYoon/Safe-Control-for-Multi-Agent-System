@@ -8,6 +8,7 @@ from typing import Mapping, Optional, Any, Dict, Tuple
 from torch.nn import Module
 
 from ..base.agent.agent import Agent
+from ..utils import obs_to_graph
 
 class SACAgent(Agent):
     """
@@ -49,6 +50,10 @@ class SACAgent(Agent):
         self.lr = self.cfg.get("learning_rate", 1e-3)
         self.entropy_learning_rate = self.cfg.get("entropy_learning_rate", 1e-3)
         self.minimum_buffer_size = self.cfg.get("minimum_buffer_size", 1000)
+
+        self.num_obs = self.policy_feature_extractor.in_features
+        self.num_state = self.value_feature_extractor.in_features
+        self.num_act = self.policy.out_features
 
         if type(self.lr) == str:
             self.lr = float(self.lr)
@@ -95,13 +100,10 @@ class SACAgent(Agent):
         :param deterministic: Whether to sample from the distribution or take the mean.
         :return: A tensor of shape (num_agents, action_dim).
         """
-        self.feature_extractor.eval()
+        self.policy_feature_extractor.eval()
         self.policy.eval()
         with torch.no_grad():
-            graph_features = torch.tensor(obs['graph_features'], dtype=torch.float, device=self.device)
-            edge_index = torch.tensor(obs['edge_index'], dtype=torch.long, device=self.device)
-            data = Batch.from_data_list([Data(x=graph_features, edge_index=edge_index)])
-            data = data.to(self.device)
+            data = obs_to_graph(obs, self.device)
             embedding = self.policy_feature_extractor(data)
             if deterministic:
                 # For evaluation, take the mean of the distribution
@@ -156,49 +158,45 @@ class SACAgent(Agent):
         # --- Feature Extraction ---
         # Extract features for policy and critic respectively.
         # Gradients will flow back to the feature extractor from both losses.
-        obs_features = self.policy_feature_extractor(obs)
-        state_features = self.value_feature_extractor(state)
+        obs_features = self.policy_feature_extractor(obs_to_graph(obs, self.device))
+        state_features = self.value_feature_extractor(obs_to_graph(state, self.device))
         with torch.no_grad():
-            next_obs_features = self.policy_feature_extractor(next_obs)
-            next_state_features = self.value_feature_extractor(next_state)
+            next_obs_features = self.policy_feature_extractor(obs_to_graph(next_obs, self.device))
+            next_actions, next_log_pi = self.policy.compute(next_obs_features)
+
+            next_state["graph_features"][:, (self.num_state-self.num_act):] = next_actions
+            next_state_features = self.value_feature_extractor(obs_to_graph(next_state, self.device))
+            critic_input_next = next_state_features
 
         # --- Critic Loss ---
         with torch.no_grad():
-            next_actions, next_log_pi = self.policy.compute(next_obs_features)
-            next_state_features["graph_features"] = next_actions
-            critic_input_next = next_state_features
-
             q1_next_target = self.target_critic_1.compute(critic_input_next)
             q2_next_target = self.target_critic_2.compute(critic_input_next)
             min_q_next_target = torch.min(q1_next_target, q2_next_target) - self.alpha * next_log_pi
             next_q_value = rewards + (~dones) * self.discount_factor * min_q_next_target
 
-        critic_input_current = torch.cat([state_features, actions], dim=1)
+        critic_input_current = state_features
         q1_current = self.value_1.compute(critic_input_current)
         q2_current = self.value_2.compute(critic_input_current)
         critic_loss = (F.mse_loss(q1_current, next_q_value) + F.mse_loss(q2_current, next_q_value)) / 2
 
-        all_params = itertools.chain(self.feature_extractor.parameters(),
-                                     self.policy.parameters(),
-                                     self.value_1.parameters(),
-                                     self.value_2.parameters())
+        value_params = itertools.chain(self.value_feature_extractor.parameters(),
+                                 self.value_1.parameters(),
+                                 self.value_2.parameters())
         
-        self.optimizer.zero_grad()
+        self.value_optimizer.zero_grad()
         critic_loss.backward()
-        self.optimizer.step()
+        torch.nn.utils.clip_grad_norm_(value_params, self.grad_norm_clip)
+        self.value_optimizer.step()
 
         # --- Policy Loss ---
-        for p in self.value_1.parameters(): p.requires_grad = False
-        for p in self.value_2.parameters(): p.requires_grad = False
-
+        # TODO : state_features를 critic loss 계산 이후 재계산 해야 하는지 Check
         pi, log_pi = self.policy.compute(obs_features)
         
-        # Note: state_features are used here, allowing gradients from policy_loss
-        # to flow back to the feature_extractor through the critic evaluation.
-        q1_pi = self.value_1(torch.cat([state_features, pi], dim=1))
-        q2_pi = self.value_2(torch.cat([state_features, pi], dim=1))
+        state_features["graph_features"][:, (self.num_state-self.num_act):] = pi
+        q1_pi = self.value_1(state_features)
+        q2_pi = self.value_2(state_features)
         policy_loss = (self.alpha * log_pi - torch.min(q1_pi, q2_pi)).mean()
-
 
         # --- Alpha (Entropy) Loss ---
         if self.learn_entropy:
@@ -206,11 +204,14 @@ class SACAgent(Agent):
         else:
             alpha_loss = torch.tensor(0.0, device=self.device)
 
+        policy_params = itertools.chain(self.policy_feature_extractor.parameters(),
+                                       self.policy.parameters())
+
         # --- Combined Optimization Step for Critic and Policy ---
-        self.optimizer.zero_grad()
+        self.policy_optimizer.zero_grad()
         policy_loss.backward()
-        torch.nn.utils.clip_grad_norm_(all_params, self.grad_norm_clip)
-        self.optimizer.step()
+        torch.nn.utils.clip_grad_norm_(policy_params, self.grad_norm_clip)
+        self.policy_optimizer.step()
 
         # --- Alpha Optimizer Step ---
         if self.learn_entropy:
@@ -218,9 +219,6 @@ class SACAgent(Agent):
             alpha_loss.backward()
             self.alpha_optimizer.step()
             self.alpha = self.log_alpha.exp().detach()
-
-        for p in self.value_1.parameters(): p.requires_grad = True
-        for p in self.value_2.parameters(): p.requires_grad = True
 
         # --- Target Network Update ---
         with torch.no_grad():

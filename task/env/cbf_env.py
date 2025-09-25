@@ -140,10 +140,10 @@ class CBFEnv(Env):
             Observation Config for Actor Network [n, obs_dim]
         """
         # obs = {
-        #     "graph_features": np.hstack([self.robot_locations,      # (2)
-        #                                  self.robot_velocities,     # (2)
-        #                                  self.virtual_ray,          # (36)
-        #                                  self.frontier_features]),  # (9)
+        #     "graph_features": np.hstack([self.robot_pose [x,y,yaw],       # (3)
+        #                                  self.robot_velocities [vx,vy,w], # (3)
+        #                                  self.virtual_ray,                # (36)
+        #                                  self.frontier_features]),        # (9)
 
         #     "edge_index": self.graph_edge_index        
 
@@ -160,6 +160,11 @@ class CBFEnv(Env):
         """
             State Config for Critic Network [n, state_dim]
         """
+
+        state = {
+            "graph_features": np.zeros((self.cfg.num_state, ), dtype=np.float32),
+            "edge_index": self.graph_edge_index        
+        }
 
         return self._get_observations()
 

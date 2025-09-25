@@ -19,7 +19,7 @@ class CBFEnvCfg(EnvCfg):
         self.num_valid_cluster = 3
         self.num_cluster_state = 3
         self.num_obs = 49
-        self.num_state = 49
+        self.num_state = 51
         self.num_act = 2
 
         # Episode Information

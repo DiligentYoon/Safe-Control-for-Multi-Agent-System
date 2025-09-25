@@ -16,7 +16,8 @@ class GNN_Feature_Extractor(nn.Module):
                  cfg):
         super().__init__()
 
-        gnn_hidden_dim = cfg['hidden'] 
+        gnn_hidden_dim = cfg['hidden']
+        self.in_features = num_node_features
         self.gnn_conv1 = GATConv(num_node_features, gnn_hidden_dim, heads=4)
         self.gnn_conv2 = GATConv(gnn_hidden_dim * 4, gnn_hidden_dim, heads=1)
     
