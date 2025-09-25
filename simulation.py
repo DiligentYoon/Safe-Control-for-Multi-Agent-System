@@ -175,9 +175,9 @@ class Simulator:
                 # Follower's target is the leader's current position.
                 # Convert leader's world position to the follower's local frame.
                 if i == 0:
-                    p_target = robot.world_to_local(leader_robot.x-0.02, leader_robot.y-0.02)
+                    p_target = robot.world_to_local(leader_robot.x, leader_robot.y)
                 else:
-                    p_target = robot.world_to_local(leader_robot.x-0.02, leader_robot.y+0.02)
+                    p_target = robot.world_to_local(leader_robot.x, leader_robot.y)
             
                 all_viz_data[i]["target_local"] = np.asarray(p_target, dtype=float)
             
@@ -188,13 +188,16 @@ class Simulator:
                 lx, ly = robot.world_to_local(other_robot.x, other_robot.y)
                 # Now use the corrected robot.vx, vy attributes
                 lvx, lvy = self._vector_world_to_local(robot, other_robot.vx, other_robot.vy)
-                other_robots_local.append((lx, ly))
-                other_robots_vel_local.append((lvx, lvy))
+                if np.sqrt(lx**2+ly**2) <= self.controllers[i].d_max * 1.1:
+                    other_robots_local.append((lx, ly))
+                    other_robots_vel_local.append((lvx, lvy))
 
             # Compute control command
             if self.control_mode == 'decentralized':
                 robot_vel = np.sqrt(robot.vx**2 + robot.vy**2)
-                v_cmd, w_cmd, v_ref, w_ref, cbf_values = self.controllers[i].compute_control(p_target, robot_vel, obs_local, other_robots_local, other_robots_vel_local)
+                v_cmd, w_cmd, v_ref, w_ref, cbf_values = self.controllers[i].compute_control(p_target, robot_vel, 
+                                                                                             obs_local, other_robots_local, 
+                                                                                             other_robots_vel_local)
                 commands.append((v_cmd, w_cmd))
                 self.nominal_inputs_history[i].append((v_ref, w_ref))
                 self.safe_inputs_history[i].append((v_cmd, w_cmd))
