@@ -14,7 +14,7 @@ from scipy.spatial.distance import cdist
 class CBFEnv(Env):
     def __init__(self, episode_index: int | np.ndarray, cfg: dict):
         self.cfg = CBFEnvCfg(cfg)
-        super().__init__(episode_index, cfg)
+        super().__init__(self.cfg)
 
         self.dt = self.cfg.physics_dt
         self.decimation = self.cfg.decimation
@@ -24,7 +24,7 @@ class CBFEnv(Env):
         # 핵심 Planning State
         self.local_patches = np.zeros((self.num_agent, self.patch_size, self.patch_size), dtype=np.float32)
         self.pos_patches = np.zeros((self.patch_size, self.patch_size), dtype=np.float32)
-        self.virtual_ray = np.zeros((self.num_agent, self.cfg.graph["num_rays"]), dtype=np.float32)
+        self.virtual_ray = np.zeros((self.num_agent, self.cfg.num_rays), dtype=np.float32)
         self.frontier_features = np.zeros((self.num_agent, self.cfg.num_cluster_state * self.cfg.num_valid_cluster), dtype=np.float32)
 
         self.num_frontiers = np.zeros((self.num_agent, 1), dtype=np.float32)
@@ -49,7 +49,7 @@ class CBFEnv(Env):
     
 
     def _set_init_state(self,
-                        max_attempts: int = 500
+                        max_attempts: int = 1000
                         ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Args:
@@ -59,33 +59,43 @@ class CBFEnv(Env):
             Tuple[np.ndarray, np.ndarray]: (world_x, world_y) 각 에이전트의 월드 좌표.
         """
         H, W = self.map_info.H, self.map_info.W
+        d_max, d_min = self.cfg.d_max, self.cfg.d_safe 
 
-        start_cells = np.mean(np.argwhere(self.map_info.gt == 
-                                          self.map_info.map_mask["start"]), axis=0)
-        start_cells = np.round(start_cells).astype(int)
+        start_rows, start_cols = np.where(self.map_info.gt == self.map_info.map_mask["start"])
+        start_cell_candidates = np.stack([start_rows, start_cols], axis=1)
 
-        center_world_x = start_cells[1] * self.map_info.res_m
-        center_world_y = (H - 1 - start_cells[0]) * self.map_info.res_m
+        if len(start_cell_candidates) < self.num_agent:
+            raise ValueError(f"Number of start cells ({len(start_cell_candidates)}) is less than "
+                            f"the number of agents ({self.num_agent}).")
 
-        for _ in range(max_attempts):
-            radius = np.random.uniform(0.05, 0.2)
+        for attempt in range(max_attempts):
+            # 랜덤 샘플링
+            # 후보 셀 중에서 num_agent 개수만큼 비복원 추출합니다.
+            indices = np.random.choice(len(start_cell_candidates), self.num_agent, replace=False)
+            selected_cells = start_cell_candidates[indices] # shape: (num_agent, 2)
 
-            angles = np.linspace(0, 2 * np.pi, self.num_agent, endpoint=False)
-            x_offsets = radius * np.cos(angles)
-            y_offsets = radius * np.sin(angles)
-            
-            agent_world_x = center_world_x + x_offsets
-            agent_world_y = center_world_y + y_offsets
+            # 월드 좌표로 변환 (거리 계산을 위해)
+            selected_world_coords = self.map_info.grid_to_world_np(selected_cells)
 
-            agent_cols = (agent_world_x / self.map_info.res_m).astype(int)
-            agent_rows = (H - 1 - agent_world_y / self.map_info.res_m).astype(int)
-            
-            is_within_bounds = np.all((agent_rows >= 0) & (agent_rows < H) & 
-                                      (agent_cols >= 0) & (agent_cols < W))
-            
-            if is_within_bounds and np.all(self.map_info.gt[agent_rows, agent_cols] != 
-                                           self.map_info.map_mask["occupied"]):
-                return agent_world_x, agent_world_y
+            diff = selected_world_coords[:, np.newaxis, :] - selected_world_coords[np.newaxis, :, :]
+            dist_matrix = np.linalg.norm(diff, axis=-1)
+
+            np.fill_diagonal(dist_matrix, np.inf)
+
+            # d_safe 제약조건 검사 (전체)
+            # 모든 에이전트 쌍 간의 거리가 d_safe보다 커야 합니다.
+            is_safe = np.min(dist_matrix) > d_min
+            if not is_safe:
+                continue # 조건을 만족하지 않으면 다시 샘플링
+
+            # d_max 제약조건 검사 (개별)
+            # 각 에이전트에 대해, 가장 가까운 이웃과의 거리가 d_max보다 작거나 같아야 합니다.
+            min_distances_to_neighbors = np.min(dist_matrix, axis=1)
+            is_connected = np.all(min_distances_to_neighbors <= d_max)
+
+            if is_safe and is_connected:
+                print(f"Valid start positions found after {attempt + 1} attempts.")
+                return selected_world_coords[:, 0], selected_world_coords[:, 1]
 
         raise RuntimeError(f"No valid starting positions found within {max_attempts}")
         
@@ -166,7 +176,7 @@ class CBFEnv(Env):
             "edge_index": self.graph_edge_index        
         }
 
-        return self._get_observations()
+        return state
 
 
     def _get_dones(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -230,7 +240,6 @@ class CBFEnv(Env):
 
         # 최종 Terminated 조건
         # 개별 드론이 충돌하거나 모든 드론이 목표에 도달하면 종료
-        # step로직에서 사용되는 개별 드론의 도착 유무도 함께 리턴
         terminated = self.is_collided_obstacle | self.is_collided_drone | any_reached_goal
 
         return terminated, truncated, self.is_reached_goal
@@ -240,6 +249,9 @@ class CBFEnv(Env):
         reward =  -1 * np.ones(1)
 
         return reward
+    
+    def _update_infos(self):
+        pass
 
 
     # ============= Auxilary Methods ==============

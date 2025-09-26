@@ -4,7 +4,7 @@ import torch
 from typing import Dict, Any
 
 from task.env.cbf_env import CBFEnv
-from task.models.models import GNN_Feature_Extractor, ActorGaussianNet, CriticDeterministicNet
+from task.models.models import GNN_Feature_Extractor, ActorGaussianNet, CriticDeterministicNet, DifferentiableCBFLayer
 from task.agent.sac import SACAgent
 
 @ray.remote
@@ -49,37 +49,46 @@ class OffPolicyWorker:
         print(f"Worker {self.worker_id}: Initialized. Will collect {self.rollout_length} steps per call.")
 
 
-    def _create_models(self, obs_dim, state_dim, action_dim, num_agents, model_cfg) -> dict:
+    def _create_models(self, obs_dim, state_dim, action_dim, model_cfg) -> dict:
         """Creates the policy and critic models."""
 
         # Feature Extractor
         global_feature_extractor = GNN_Feature_Extractor(state_dim, model_cfg['feature_extractor'])
         local_feature_extractor = GNN_Feature_Extractor(obs_dim, model_cfg['feature_extractor'])
-
+        
+        # Policy
         actor_type = model_cfg['actor']['type']
         if actor_type == "Gaussian":
             policy_input_dim = model_cfg['feature_extractor']['hidden']
             policy = ActorGaussianNet(policy_input_dim, action_dim, self.device, model_cfg['actor'])
         else:
             ValueError("[INFO] TODO : we should construct the deterministic policy for MADDPG ...")
+
+        # Safety
+        safety = DifferentiableCBFLayer(cfg=model_cfg["safety"])
     
-        # Centralized critic input dimension: state + agent actions
+        # Centralized critic
         critic_input_dim = model_cfg['feature_extractor']['hidden']
         critic1 = CriticDeterministicNet(critic_input_dim, 1, self.device, model_cfg['critic'])
         critic2 = CriticDeterministicNet(critic_input_dim, 1, self.device, model_cfg['critic'])
         
-        return {"policy_feature_exractor": local_feature_extractor,
+        return {"policy_feature_extractor": local_feature_extractor,
                 "value_feature_extractor": global_feature_extractor,
+                "safety": safety,
                 "policy": policy, 
                 "value_1": critic1, 
                 "value_2": critic2}
 
-    def set_weights(self, policy_weights: Dict[str, Dict[str, torch.Tensor]]):
+    def set_weights(self, policy_weights: Dict[str, Dict[str, torch.Tensor]], role: str = None):
         """
         Updates the local agent's policy networks with new weights from the driver.
         """
-        self.agent.policy_feature_extractor.load_state_dict(policy_weights["policy_feature_extractor"])
-        self.agent.policy.load_state_dict(policy_weights["policy"])
+        if role == "policy":
+            self.agent.policy.load_state_dict(policy_weights["policy"])
+        elif role == "policy_feature_extractor":
+            self.agent.policy_feature_extractor.load_state_dict(policy_weights["policy_feature_extractor"])
+        else:
+            ValueError("Not supported role Type.")
 
     def rollout(self, episode_index: int) -> Dict[str, Any]:
         """
@@ -118,7 +127,8 @@ class OffPolicyWorker:
                     "next_obs": next_obs[i],
                     "next_state": next_state[i],
                     "terminated": terminated[i],
-                    "truncated": truncated[i]
+                    "truncated": truncated[i],
+                    "infos": infos[i]
                 })
             
             obs = next_obs

@@ -11,8 +11,8 @@ class MapInfo:
     def __init__(self, cfg: dict):
         self.cfg = cfg
 
-        self.meters_h = cfg.get("height", 5.0)
-        self.meters_w = cfg.get("width", 1.0)
+        self.meters_h = cfg.get("height", 1.0)
+        self.meters_w = cfg.get("width", 5.0)
         self.res_m = cfg.get("resolution", 0.01)
         self.map_mask = self.cfg["map_representation"]
 
@@ -41,6 +41,8 @@ class MapInfo:
     
     def world_to_grid_np(self, world: np.ndarray) -> np.ndarray:
         H, W = self.H, self.W
+        if world.ndim == 1:
+            world = world.reshape(1, -1)
         x = world[:, 0]
         y = world[:, 1]
         col = int(np.clip(x / self.res_m, 0, W - 1))
@@ -66,6 +68,8 @@ class MapInfo:
     def reset_gt_and_belief(self):
         self.gt.fill(self.map_mask["free"])
         self.belief.fill(self.map_mask["unknown"])
+        self.add_border_walls()
+        self.add_start_and_goal_zones()
 
     def place_start_goal(self, start_xy=(0.1, 0.5), goal_xy=(4.9, 0.5)):
         rs, cs = self.world_to_grid(*start_xy)
@@ -83,15 +87,33 @@ class MapInfo:
 
     def add_random_rect_obstacles(self, n: int = 5, min_w_m: float = 0.05, min_h_m: float = 0.05,
                                   max_w_m: float = 0.30, max_h_m: float = 0.30,
+                                  min_x_m: float = 0.1,
                                   seed: Optional[int] = None):
         """Place N rectangular obstacles of random size with min/max dimensions."""
         rng = np.random.default_rng(seed)
         for _ in range(max(0, int(n))):
             w = rng.uniform(min_w_m, max_w_m)
             h = rng.uniform(min_h_m, max_h_m)
-            x = rng.uniform(0.0, max(1e-6, self.meters_w - w))
-            y = rng.uniform(0.0, max(1e-6, self.meters_h - h))
+            x = rng.uniform(min_x_m, max(min_x_m, self.meters_w - w))
+            y = rng.uniform(0.0, max(min_x_m, self.meters_h - h))
             self.add_rect_obstacle(x, y, x+w, y+h)
+
+    def add_border_walls(self, thickness_m: float = 0.05):
+        t = max(1, int(round(thickness_m / self.res_m)))
+        self.gt[:t, :] = self.map_mask["occupied"]
+        self.gt[-t:, :] = self.map_mask["occupied"]
+        self.gt[:, :t] = self.map_mask["occupied"]
+        self.gt[:, -t:] = self.map_mask["occupied"]
+
+    def add_start_and_goal_zones(self, 
+                                 wall_thickness_m: float = 0.05,
+                                 thickness_m: float = 0.1):
+        W = self.W
+        wall_t = max(1, int(round(wall_thickness_m / self.res_m)))
+        t = max(1, int(round(thickness_m / self.res_m)))
+        self.gt[:, wall_t:wall_t+t] = self.map_mask["start"]
+        self.gt[:, W-1-wall_t-t:W-1-wall_t] = self.map_mask["goal"]
+
 
 
 
@@ -109,7 +131,7 @@ class Env():
         self.max_lin_vel = self.cfg.max_velocity
         self.max_ang_vel = self.cfg.max_yaw_rate
 
-        self.map_info = MapInfo(cfg=cfg["map"])
+        self.map_info = MapInfo(cfg=cfg.map)
         
         # Location은 2D, Velocity는 스칼라 커맨드
         self.robot_locations = np.zeros((self.num_agent, 2), dtype=np.float32)
@@ -136,10 +158,6 @@ class Env():
         world_x, world_y = self._set_init_state()
         self.robot_locations = np.stack([world_x, world_y], axis=1)
 
-        # Compute goal coordinates (average over all goal cells)
-        goal_world = self._set_goal_state()
-        self.goal_locations = goal_world
-
         # Initialize headings
         self.angles = 0 * np.random.uniform(0, 2*np.pi, size=self.num_agent)
         # Perform initial sensing update for each agent
@@ -154,8 +172,6 @@ class Env():
                                                        np.rad2deg(self.angles[i]),
                                                        360,
                                                        self.map_info.map_mask)
-
-        self.prev_dists = [np.linalg.norm(self.robot_locations[i] - self.goal_locations) for i in range(self.num_agent)]
         
         self._compute_intermediate_values()
         self.obs_buf = self._get_observations()
@@ -163,23 +179,6 @@ class Env():
         self._update_infos()
 
         return self.obs_buf, self.state_buf, self.infos
-
-
-    def _set_goal_state(self) -> np.ndarray:
-        goal_cells = np.column_stack(np.nonzero(self.map_info.gt == self.map_info.map_mask["goal"]))
-        num_samples = min(self.num_agent, len(goal_cells))
-
-        goal_indices = np.random.choice(len(goal_cells), size=num_samples)
-        sampled_cells = goal_cells[goal_indices]
-
-        rows = sampled_cells[:, 0]
-        cols = sampled_cells[:, 1]
-
-        x_coords, y_coords = self.map_info.grid_to_world(rows, cols)
-
-        sampled_goal_world = np.column_stack((x_coords, y_coords))
-
-        return np.mean(sampled_goal_world, axis=0)
 
     def _set_init_state(self) -> Tuple[np.ndarray, np.ndarray]:
         map_info = self.map_info

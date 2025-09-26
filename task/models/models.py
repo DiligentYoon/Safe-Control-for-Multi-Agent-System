@@ -2,12 +2,163 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
+import cvxpy as cp
+
+from cvxpylayers.torch import CvxpyLayer
 from torch.distributions import Categorical, Normal
 from torch_geometric.nn import GATConv, global_mean_pool
 from torch_geometric.data import Data
+from typing import Dict
+
 
 LOG_STD_MIN = -20
 LOG_STD_MAX = 2
+
+class DifferentiableCBFLayer(nn.Module):
+    def __init__(self, cfg: Dict):
+        super().__init__()
+        # 설정값(hyperparameters) 저장
+        self.cfg = cfg
+        self.max_obs = cfg['max_obs']
+        self.max_agents = cfg['max_agents']
+
+        # Constraints Info
+        self.a_max = cfg['a_max']
+        self.w_max = cfg['w_max']
+
+        self.d_max =  cfg['d_max']
+        self.d_obs = cfg['d_obs']
+        self.d_safe = cfg['d_safe']
+
+        self.damping = cfg['damping']
+        self.stiffness = cfg['stiffness']
+
+        # Objective Info
+        self.w_slack = cfg['w_slack']
+
+        # Action Scaler
+        self.action_scale = torch.tensor([self.a_max, self.w_max])
+
+        # Total Constraints (Static Obstacle + Dynamic Obstacle + Connectivity)
+        self.num_constraints = self.max_obs + 2 * self.max_agents 
+        
+        # 1. 최적화 변수 (Decision Variables) 정의
+        x_vars = cp.Variable(3, name='x_vars')             # x = [a, w, delta]
+
+        # 2. 목적 함수 (Objective Function) 정의
+        # Q와 P 행렬을 사용하여 목적 함수를 명시적으로 정의 (1/2 * x^T * Q * x + p^T * x)
+        Q_val = np.zeros((3, 3))
+        Q_val[0, 0] = 2.0                       # a^2 계수
+        Q_val[1, 1] = 2.0                       # w^2 계수
+        Q_val[2, 2] = 2.0 * self.cfg['w_slack'] # delta^2 계수
+        p = cp.Parameter(3, name='p')                # Linear part
+        objective = cp.Minimize(0.5 * cp.quad_form(x_vars, Q_val) + p.T @ x_vars)
+
+        # 3. 파라미터 (Inputs to the Layer) 정의 - 이제 G, h, u_ref가 파라미터가 됨
+        # CBF의 부등식 제약조건을 Gx <= h로 표현하기 위해 G와 h를 파라미터로 정의
+        G = cp.Parameter((self.num_constraints, 3), name='G')
+        h = cp.Parameter(self.num_constraints, name='h')
+
+        # 4. 제약 조건 (Constraints) 정의
+        constraints = [ G @ x_vars <= h ]
+        constraints += [
+            x_vars[0] >= -self.cfg['a_max'], x_vars[0] <= self.cfg['a_max'],
+            x_vars[1] >= -self.cfg['w_max'], x_vars[1] <= self.cfg['w_max'],
+            x_vars[2] >= 0.0
+        ]
+
+        # 5. CvxpyLayer 생성
+        problem = cp.Problem(objective, constraints)
+        self.layer = CvxpyLayer(
+            problem,
+            parameters=[p, G, h],
+            variables=[x_vars]
+        )
+
+    def forward(self, u_nominal: torch.Tensor, state: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """
+        :param u_nominal: 제안된 공칭 제어 입력 (B, 2)
+        :param state: 현재 상태 정보를 담은 딕셔너리
+        :return: 안전 필터를 거친 최종 제어 입력 (B, 2)
+        """
+        # state 딕셔너리에서 텐서 추출 및 디바이스 맞춤
+        batch_size = u_nominal.shape[0]
+        device = u_nominal.device
+
+        # [-1, 1]범위로 정규화 되어있는 u_nominal을 실제 제어 입력 스케일로 전환
+        u_nominal_scaled = u_nominal * self.action_scale.to(u_nominal.device)
+
+        # --- 목적 함수 행렬 Q, p 계산 ---
+        # Form : 1/2 * x^T * Q * x + p^T * x
+        # Q는 파라미터가 아니므로 계산 X
+        p = torch.zeros(batch_size, 3, device=device)
+        p[:, 0] = -2.0 * u_nominal_scaled[:, 0] # -2*a_ref*a 항
+        p[:, 1] = -2.0 * u_nominal_scaled[:, 1] # -2*w_ref*w 항
+
+        # --- 제약 조건 행렬 G, h 계산 ---
+        # 제약 조건 담을 때, 감지된 obs와 agent수 만큼만 유효하도록 마스킹 해야 함.
+        G = torch.zeros(batch_size, self.num_constraints, 3, device=device)
+        h = torch.zeros(batch_size, self.num_constraints, device=device)
+
+        # state 딕셔너리에서 텐서 추출
+        v_current = state['v_current'].squeeze(-1) # (B,)
+        p_obs = state['p_obs']                     # (B, max_obs, 2)
+        p_agents = state['p_agents']               # (B, max_agents, 2)
+        v_agents_local = state['v_agents_local']   # (B, max_agents, 2)
+        agent_active = state['agent_active']       # (B, max_agents)
+
+        # --- 정적 장애물 제약 (G, h의 첫 max_obs개 행) ---
+        lx_obs, ly_obs = p_obs[..., 0], p_obs[..., 1] # (B, max_obs)
+        h_obs = lx_obs**2 + ly_obs**2 - self.cfg['d_obs']**2
+        h_dot_obs = -2 * lx_obs * v_current.unsqueeze(1)
+        # Form : 2l_x * a + 2l_y * v * w - \delta <= 2v^2 - k_1 * \dot{h} + k_2 * h
+        # TODO: 가변 Obstacle 수에 대응할 수 있는 1e6-padding 데이터로 저장하기 (worker쪽에서 수행)
+        G[:, :self.max_obs, 0] = 2 * lx_obs                          # a의 계수
+        G[:, :self.max_obs, 1] = 2 * ly_obs * v_current.unsqueeze(1) # w의 계수
+        G[:, :self.max_obs, 2] = -1.0                                # delta의 계수
+        # h의 값들
+        h[:, :self.max_obs] = (2 * v_current.unsqueeze(1)**2) + \
+                              self.cfg['damping'] * h_dot_obs + \
+                              self.cfg['stiffness'] * h_obs
+    
+
+        # --- 동적 에이전트 제약 ---
+        lx_ag, ly_ag = p_agents[..., 0], p_agents[..., 1]
+        v_jx, v_jy = v_agents_local[..., 0], v_agents_local[..., 1]
+        
+        # 1. 충돌 회피
+        # Form : 2l_x * a + 2l_y * v * w - 2l_y * v_{jx} * w + 2l_x * v_{jy} * w <= ...
+        h_avoid = lx_ag**2 + ly_ag**2 - self.cfg['d_safe']**2
+        h_dot_avoid = -2*lx_ag*v_current.unsqueeze(1) + 2*(lx_ag*v_jx + ly_ag*v_jy)
+        
+        G_avoid_a = 2 * lx_ag
+        G_avoid_w = 2*ly_ag*v_current.unsqueeze(1) - 2*ly_ag*v_jx + 2*lx_ag*v_jy
+        G[:, self.max_obs::2, 0] = G_avoid_a * agent_active
+        G[:, self.max_obs::2, 1] = G_avoid_w * agent_active
+        
+        # TODO: 가변 Agent 수에 대응할 수 있는 zero-padding 데이터로 저장하기 (worker쪽에서 수행)
+        h_dot_dot_const = 2*v_current.unsqueeze(1)**2 - 2*v_current.unsqueeze(1)*v_jx + 2*(-v_current.unsqueeze(1)*v_jx + v_jx**2 + v_jy**2)
+        h[:, self.max_obs::2] = (h_dot_dot_const + self.cfg['damping']*h_dot_avoid + self.cfg['stiffness']*h_avoid) * agent_active
+
+        # 2. 연결 유지
+        G[:, self.max_obs+1::2, 0] = -G_avoid_a * agent_active
+        G[:, self.max_obs+1::2, 1] = -G_avoid_w * agent_active
+        h_conn = self.cfg['d_max']**2 - (lx_ag**2 + ly_ag**2)
+        h_dot_conn = -h_dot_avoid
+        # TODO: 가변 Agent 수에 대응할 수 있는 zero-padding 데이터로 저장하기 (worker쪽에서 수행)
+        h[:, self.max_obs+1::2] = (-h_dot_dot_const + self.cfg['damping']*h_dot_conn + self.cfg['stiffness']*h_conn) * agent_active
+
+        # CvxpyLayer에 계산된 텐서들 전달
+        solution, = self.layer(p, G, h, solver_args={'solve_method': 'ECOS'})
+
+        # 솔루션에서 안전한 제어 입력 u_safe만 추출
+        u_safe = solution[:, :2]
+        
+        # 제어 입력 스케일로 나온 Safe Control Input을 다시 정규화
+        u_safe_normalized = u_safe / self.action_scale.to(u_nominal.device)
+        
+        return u_safe_normalized
 
 
 class GNN_Feature_Extractor(nn.Module):
@@ -31,6 +182,7 @@ class GNN_Feature_Extractor(nn.Module):
         graph_vector = global_mean_pool(x, batch)
 
         return graph_vector
+    
     
 class ActorGaussianNet(nn.Module):
     def __init__(self, obs_dim, action_dim, device, cfg):

@@ -22,12 +22,15 @@ class SACAgent(Agent):
                  device: torch.device, 
                  cfg: Optional[dict] = None):
         
-        super().__init__(num_agents, models, device, cfg)
+        super().__init__(models, device, cfg)
+
+        self.num_agent = num_agents
 
         # --- Model Registration ---
         self.policy_feature_extractor = self.models.get("policy_feature_extractor")
         self.value_feature_extractor = self.models.get("value_feature_extractor")
         self.policy = self.models.get("policy")
+        self.safety = self.models.get("safety")
         self.value_1 = self.models.get("value_1")
         self.value_2 = self.models.get("value_2")
         
@@ -91,7 +94,10 @@ class SACAgent(Agent):
             self.checkpoint_modules["log_alpha"] = self.log_alpha
             self.checkpoint_modules["alpha_optimizer"] = self.alpha_optimizer
 
-    def act(self, obs: torch.Tensor, deterministic: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
+    def act(self, 
+            obs: torch.Tensor, 
+            deterministic: bool = False, 
+            safety_info: Dict[str, torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Called by the RolloutWorker. Samples actions from the policy.
         If deterministic is True, it returns the mean of the policy distribution.
@@ -101,6 +107,7 @@ class SACAgent(Agent):
         :return: A tensor of shape (num_agents, action_dim).
         """
         self.policy_feature_extractor.eval()
+        self.safety.eval()
         self.policy.eval()
         with torch.no_grad():
             data = obs_to_graph(obs, self.device)
@@ -114,11 +121,14 @@ class SACAgent(Agent):
                 # For training, sample from the distribution
                 # The `sample` method from ActorGaussianNet already returns tanh-squashed actions
                 actions, logp = self.policy.compute(embedding)
+        
+            actions_s = self.safety(actions, safety_info)
 
         self.policy_feature_extractor.train()
         self.policy.train()
+        self.safety.train()
 
-        return actions, logp
+        return actions, actions_s, logp
 
     def get_checkpoint_data(self) -> Dict[str, Any]:
         """
@@ -145,11 +155,13 @@ class SACAgent(Agent):
             state = {k: v.to(self.device) for k, v in batch['state'].items()}
             next_obs = {k: v.to(self.device) for k, v in batch['next_obs'].items()}
             next_state = {k: v.to(self.device) for k, v in batch['next_state'].items()}
+            info = {k: v.to(self.device) for k, v in batch['info'].items()}
         else:
             obs = batch['obs'].to(self.device)
             state = batch['state'].to(self.device)
             next_obs = batch['next_obs'].to(self.device)
             next_state = batch['next_state'].to(self.device)
+            info = {k: v.to(self.device) for k, v in batch['info'].items()}
 
         actions = batch['actions'].to(self.device)
         rewards = batch['rewards'].to(self.device)
@@ -157,14 +169,16 @@ class SACAgent(Agent):
 
         # --- Feature Extraction ---
         # Extract features for policy and critic respectively.
-        # Gradients will flow back to the feature extractor from both losses.
+        safety_info = info["safety"]
+        next_safety_info = info["next_safety"]
         obs_features = self.policy_feature_extractor(obs_to_graph(obs, self.device))
         state_features = self.value_feature_extractor(obs_to_graph(state, self.device))
         with torch.no_grad():
             next_obs_features = self.policy_feature_extractor(obs_to_graph(next_obs, self.device))
             next_actions, next_log_pi = self.policy.compute(next_obs_features)
+            next_safe_actions = self.safety(next_actions, next_safety_info)
 
-            next_state["graph_features"][:, (self.num_state-self.num_act):] = next_actions
+            next_state["graph_features"][:, (self.num_state-self.num_act):] = next_safe_actions
             next_state_features = self.value_feature_extractor(obs_to_graph(next_state, self.device))
             critic_input_next = next_state_features
 
@@ -192,8 +206,9 @@ class SACAgent(Agent):
         # --- Policy Loss ---
         # TODO : state_features를 critic loss 계산 이후 재계산 해야 하는지 Check
         pi, log_pi = self.policy.compute(obs_features)
+        pi_safe = self.safety(pi, safety_info)
         
-        state_features["graph_features"][:, (self.num_state-self.num_act):] = pi
+        state_features["graph_features"][:, (self.num_state-self.num_act):] = pi_safe
         q1_pi = self.value_1(state_features)
         q2_pi = self.value_2(state_features)
         policy_loss = (self.alpha * log_pi - torch.min(q1_pi, q2_pi)).mean()

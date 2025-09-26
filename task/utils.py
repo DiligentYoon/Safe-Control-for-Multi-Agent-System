@@ -10,7 +10,6 @@ def obs_to_graph(self, obs, device):
     data = data.to(device)
     return data
 
-
 def create_fully_connected_edges(num_agent:int) -> np.ndarray:
     """
         완전 연결 그래프의 edge_index를 NumPy 배열로 생성

@@ -10,7 +10,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from task.env.cbf_env import CBFEnv
 from task.agent.sac import SACAgent
-from task.models.models import ActorGaussianNet, CriticDeterministicNet, GNN_Feature_Extractor
+from task.models.models import ActorGaussianNet, CriticDeterministicNet, GNN_Feature_Extractor, DifferentiableCBFLayer
 from task.worker.off_policy_worker import OffPolicyWorker
 from task.buffer.random_buffer import RandomBuffer
 
@@ -51,16 +51,24 @@ class MainDriver:
         state_dim = temp_env.cfg.num_state
         action_dim = temp_env.cfg.num_act
         num_agents = self.cfg['env']['num_agent']
+
+        # Setting CBF Constraints Variables from Env
+        self.cfg['model']['safety']['a_max'] = temp_env.cfg.max_yaw_rate
+        self.cfg['model']['safety']['w_max'] = temp_env.cfg.max_acceleration
+        self.cfg['model']['safety']['d_max'] = temp_env.cfg.d_max
+        self.cfg['model']['safety']['d_obs'] = temp_env.cfg.d_obs
+        self.cfg['model']['safety']['d_safe'] = temp_env.cfg.d_safe
         del temp_env
 
         # --- Centralized Components ---
         # 1. Master Agent (holds the master networks and optimizers)
-        models = self._create_models(obs_dim, state_dim, action_dim, num_agents)
+
+        models = self._create_models(obs_dim, state_dim, action_dim)
         self.master_agent = SACAgent(num_agents=num_agents,
                                      models=models,
                                      device=self.device,
                                      cfg=self.cfg['agent'])
-        print("Master Agent created.")
+        print("[INFO] Master Agent created.")
 
         # 2. Replay Buffer
         buffer_size = self.cfg['agent']['buffer']['replay_size']
@@ -77,14 +85,13 @@ class MainDriver:
 
         # --- Data Logging ---
         self.tracking_data = collections.defaultdict(list)
-
         self._track_episode_rewards = collections.deque(maxlen=50)
         self._track_episode_lengths = collections.deque(maxlen=50)
         self._track_instantaneous_rewards = collections.deque(maxlen=50)
 
 
 
-    def _create_models(self, obs_dim, state_dim, action_dim, num_agents) -> dict:
+    def _create_models(self, obs_dim, state_dim, action_dim) -> dict:
         """Creates the policy and critic models."""
         model_cfg = self.cfg['model']
 
@@ -92,36 +99,43 @@ class MainDriver:
         global_feature_extractor = GNN_Feature_Extractor(state_dim, model_cfg['feature_extractor'])
         local_feature_extractor = GNN_Feature_Extractor(obs_dim, model_cfg['feature_extractor'])
 
+        # Policy
         actor_type = model_cfg['actor']['type']
         if actor_type == "Gaussian":
             policy_input_dim = model_cfg['feature_extractor']['hidden']
             policy = ActorGaussianNet(policy_input_dim, action_dim, self.device, model_cfg['actor'])
         else:
             ValueError("[INFO] TODO : we should construct the deterministic policy for MADDPG ...")
-    
+
+        # Safety
+        safety = DifferentiableCBFLayer(cfg=model_cfg["safety"])
+
         # Centralized critic input dimension: state + agent actions
         critic_input_dim = model_cfg['feature_extractor']['hidden']
         critic1 = CriticDeterministicNet(critic_input_dim, 1, self.device, model_cfg['critic'])
         critic2 = CriticDeterministicNet(critic_input_dim, 1, self.device, model_cfg['critic'])
         
-        return {"policy_feature_exractor": local_feature_extractor,
+        return {"policy_feature_extractor": local_feature_extractor,
                 "value_feature_extractor": global_feature_extractor,
                 "policy": policy, 
+                "safety": safety,
                 "value_1": critic1, 
                 "value_2": critic2}
-
-
 
     def train(self):
         """Main training loop."""
         print("=== Training Start ===")
         
-        current_weights = self.master_agent.get_checkpoint_data()['policy']
+        current_weights = self.master_agent.get_checkpoint_data()
+        current_policy_weights = current_weights['policy']
+        currnet_policy_feature_extractor_weights = current_weights["policy_feature_extractor"]
         
         # Broadcast initial weights to all workers
-        cpu_weights = {k: v.cpu() for k, v in current_weights.items()}
+        cpu_policy_weights = {k: v.cpu() for k, v in current_policy_weights.items()}
+        cpu_policy_feature_extractor_weights = {k: v.cpu() for k, v in currnet_policy_feature_extractor_weights.items()}
         for worker in self.workers:
-            worker.set_weights.remote(cpu_weights)
+            worker.set_weights.remote(cpu_policy_weights, role="policy")
+            worker.set_weights.remote(cpu_policy_feature_extractor_weights, role="policy_feature_extractor")
 
         # Start the first batch of rollouts
         jobs = [worker.rollout.remote(i) for i, worker in enumerate(self.workers)]
@@ -230,7 +244,7 @@ class MainDriver:
 
 
 if __name__ == '__main__':
-    with open("config/sac_cfg.yaml", 'r') as f:
+    with open("config/cbf_test.yaml", 'r') as f:
         config = yaml.safe_load(f)
     
     driver = MainDriver(cfg=config)

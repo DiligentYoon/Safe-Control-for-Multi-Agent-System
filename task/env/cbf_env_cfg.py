@@ -26,9 +26,9 @@ class CBFEnvCfg(EnvCfg):
         self.decimation = 2
         self.max_episode_steps = 300
 
-        # Action Scale
-        self.max_delta = 0.5
-
         # Controller Cfg
+        self.d_safe = 0.1
+        self.d_max = 0.3
+        self.d_obs = 0.05
 
 

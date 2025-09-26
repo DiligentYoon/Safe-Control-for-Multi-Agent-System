@@ -1,0 +1,91 @@
+
+ray:
+  num_cpus: 6
+  num_workers: 6
+
+# Environment Settings
+env:
+  seed: 42
+  physics_dt: 0.1
+  device: "cuda"
+
+  num_agent: 5
+  max_velocity: 0.3
+  max_yaw_rate: 0.5 # radians
+  max_acceleration: 0.2
+  fov: 120 # degrees
+  sensor_range: 0.3 # meters
+  num_rays: 61
+  map:
+    height: 5.0
+    width: 1.0
+    resolution: 0.01 
+
+    map_representation:
+      free: 0
+      unknown: 1
+      occupied: 2
+      goal: 3
+      start: 4
+      frontier: 5
+
+
+
+
+# Agent Settings
+agent:
+  rollout: 12
+  epochs: 4
+  batch_size: 4
+
+  discount_factor: 0.99
+  lambda: 0.95
+
+  learning_rate: 5e-3
+  learning_rate_scheduler: null
+  learning_rate_scheduler_kwargs: {}
+
+  clip_range: 0.2
+  grad_norm_clip: 0.5
+  
+  entropy_coef: 0.01
+  value_loss_coef: 1.0
+
+  buffer:
+    replay_size: 1000000
+
+  experiment:
+    directory: "MARL"
+    experiment_name: ""
+    write_interval: auto
+    checkpoint_interval: auto
+
+model:
+
+  feature_extractor:
+    hidden: 64
+
+  safety:
+    max_obs: 64
+    max_agents: 10
+    d_obs: 0
+    d_max: 0
+    d_safe: 0
+    a_max: 0
+    w_max: 0
+    stiffness: 6.0
+    damping: 5.0
+    w_slack: 10000
+
+
+  actor:
+    type: "Gaussian"
+    hidden: [128, 64]
+  
+  critic:
+    hidden: [128, 64]
+    
+# Training Settings
+train:
+  max_episode: 100
+  timesteps: 300000
