@@ -2,24 +2,17 @@
 from ..base.env.env_cfg import EnvCfg
 
 class CBFEnvCfg(EnvCfg):
-    num_channel: int
-    num_cont_act: int
-    num_disc_act: int
+    num_obs: int
     num_state: int
     decimation: int
     max_episode_steps: int
     def __init__(self, cfg: dict) -> None:
         super().__init__(cfg)
 
-        # Local Patch Information
-        self.patch_size = 100
-        self.num_channel = 3
-
         # Space Information
-        self.num_valid_cluster = 3
-        self.num_cluster_state = 3
-        self.num_obs = 49
-        self.num_state = 51
+        self.num_virtual_rays = 37
+        self.num_obs = 48
+        self.num_state = 50
         self.num_act = 2
 
         # Episode Information
@@ -30,5 +23,7 @@ class CBFEnvCfg(EnvCfg):
         self.d_safe = 0.1
         self.d_max = 0.3
         self.d_obs = 0.05
+        self.max_obs = self.num_rays
+        self.max_agents = self.num_agent
 
 

@@ -1,35 +1,73 @@
 import numpy as np
 import torch
+import math
 
 from torch_geometric.data import Data, Batch
 
-def obs_to_graph(self, obs, device):
-    graph_features = torch.tensor(obs['graph_features'], dtype=torch.float, device=self.device)
-    edge_index = torch.tensor(obs['edge_index'], dtype=torch.long, device=self.device)
-    data = Batch.from_data_list([Data(x=graph_features, edge_index=edge_index)])
-    data = data.to(device)
-    return data
 
-def create_fully_connected_edges(num_agent:int) -> np.ndarray:
+def obs_to_graph(obs: dict | list[dict], device: torch.device) -> Data:
     """
-        완전 연결 그래프의 edge_index를 NumPy 배열로 생성
-        PyTorch Geometric 형식 [2, num_edges]
+    관측값(obs) 딕셔너리를 GNN 레이어가 처리할 수 있는
+    단일 torch_geometric.data.Data 객체로 변환합니다.
     """
-    adj = ~np.eye(num_agent, dtype=bool)
-    edge_index = np.array(np.where(adj))
+    if isinstance(obs, dict):
+        graph_features_np = obs['graph_features']
+        edge_index_np = obs['edge_index']
+        # PyTorch 텐서로 변환
+        x = torch.tensor(graph_features_np, dtype=torch.float)
+        edge_index = torch.tensor(edge_index_np, dtype=torch.long)
+        # 전체 관측을 나타내는 단일 Data 객체를 직접 생성
+        data = Data(x=x, edge_index=edge_index)
+    elif isinstance(obs, list):
+        # Data 객체 리스트 생성
+        data_list = []
+        for obs_dict in obs:
+            x = torch.tensor(obs_dict['graph_features'], dtype=torch.float)
+            edge_index = torch.tensor(obs_dict['edge_index'], dtype=torch.long)
+            data_list.append(Data(x=x, edge_index=edge_index))
+            # Batch.from_data_list를 사용하여 하나의 배치 객체로 통합
+            data = Batch.from_data_list(data_list)
+
+    return data.to(device)
+
+# def create_fully_connected_edges(num_agent:int) -> np.ndarray:
+#     """
+#         완전 연결 그래프의 edge_index를 NumPy 배열로 생성
+#         PyTorch Geometric 형식 [2, num_edges]
+#     """
+#     adj = ~np.eye(num_agent, dtype=bool)
+#     edge_index = np.array(np.where(adj))
+#     return edge_index
+
+def create_fully_connected_edges(num_nodes: int) -> np.ndarray:
+    """num_nodes개의 노드를 가진 완전 연결 그래프의 edge_index를 생성"""
+    if num_nodes <= 1:
+        return np.empty((2, 0), dtype=np.int64)
+    adj = ~np.eye(num_nodes, dtype=bool)
+    edge_index = np.array(np.where(adj), dtype=np.int64)
     return edge_index
 
+
+def world_to_local(w1: np.ndarray, w2: np.ndarray, yaw: float) -> np.ndarray:
+    """Transforms a point from world coordinates to the robot's local frame."""
+    delta = w2 - w1
+    rot_mat = np.array([[np.cos(-yaw), -np.sin(-yaw)], 
+                        [np.sin(-yaw),  np.cos(-yaw)]])
+    
+    local_pos = np.matmul(rot_mat, delta.transpose())
+    return local_pos.transpose()
+
+
 def compute_virtual_rays(map_info, 
-                          drone_pos: np.ndarray = None,
-                          drone_cell: np.ndarray = None,
-                          num_rays: int = 36, 
-                          max_range: float = 5.0) -> np.ndarray:
+                         num_rays: int,  
+                         drone_pos: np.ndarray = None,
+                         drone_cell: np.ndarray = None,
+                         max_range: float = 5.0) -> np.ndarray:
     """중심점에서 360도로 레이를 쏘아 장애물까지의 거리를 측정합니다."""
     # Shared Belief Map을 기준으로 하여, centroid에서부터 map에 대한 전반적인 정보를 함축
     # 가상의 Ray 추출 -> 어차피 업데이트가 안된 곳은 ground truth로 obstacle이여도 unknown으로 뜰 것
 
     # 장애물만 감지
-    map_info = map_info.belief
     H, W = map_info.H, map_info.W
 
     # 중심 월드 좌표 -> 셀 좌표 변환
@@ -45,8 +83,8 @@ def compute_virtual_rays(map_info,
         end_y = drone_pos[1] + max_range * np.sin(angle)
         
         # 끝점 셀 좌표 변환
-        c1 = int(end_x / map_info.cell_size)
-        r1 = int(H - 1 - end_y / map_info.cell_size)
+        c1 = int(end_x / map_info.res_m)
+        r1 = int(H - 1 - end_y / map_info.res_m)
 
         # Bresenham's line 알고리즘으로 레이 경로 상의 셀들을 순회
         for r, c in bresenham_line(r0, c0, r1, c1):
@@ -55,7 +93,7 @@ def compute_virtual_rays(map_info,
             
             # 장애물을 만나면 거리를 계산하고 이 레이는 종료
             if map_info.belief[r, c] == map_info.map_mask["occupied"]:
-                dist = np.sqrt(((r - r0)**2 + (c - c0)**2)) * map_info.cell_size
+                dist = np.sqrt(((r - r0)**2 + (c - c0)**2)) * map_info.res_m
                 distances[i] = dist
                 break
     
@@ -201,6 +239,8 @@ def sensor_work_heading(robot_position,
                         map_mask):
 
     sensor_angle_inc = 2.0
+    if robot_position.shape[0] == 1:
+        robot_position = robot_position.reshape(-1)
     x0 = robot_position[0]
     y0 = robot_position[1]
     start_angle, end_angle = calculate_fov_boundaries(heading, fov)

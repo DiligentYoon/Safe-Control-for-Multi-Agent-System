@@ -45,12 +45,10 @@ class MapInfo:
             world = world.reshape(1, -1)
         x = world[:, 0]
         y = world[:, 1]
-        col = int(np.clip(x / self.res_m, 0, W - 1))
-        row = (H - 1) - int(np.clip(y / self.res_m, 0, H - 1))
+        col = np.clip(x / self.res_m, 0, W - 1).astype(np.long)
+        row = (H - 1) - (np.clip(y / self.res_m, 0, H - 1)).astype(np.long)
 
-        grid_position = np.floor(
-            np.stack((col, row), axis=-1)
-        ).astype(int)
+        grid_position = np.stack((col, row), axis=-1)
 
         return grid_position
 
@@ -130,6 +128,7 @@ class Env():
         self.num_agent = self.cfg.num_agent
         self.max_lin_vel = self.cfg.max_velocity
         self.max_ang_vel = self.cfg.max_yaw_rate
+        self.max_lin_acc = self.cfg.max_acceleration
 
         self.map_info = MapInfo(cfg=cfg.map)
         
@@ -137,6 +136,7 @@ class Env():
         self.robot_locations = np.zeros((self.num_agent, 2), dtype=np.float32)
         self.robot_velocities = np.zeros((self.num_agent, 2), dtype=np.float32)
         self.robot_global_velocities = np.zeros((self.num_agent, 2), dtype=np.float32)
+        self.robot_angles = np.zeros((self.num_agent, 1), dtype=np.float32)
         self.robot_yaw_rate = np.zeros((self.num_agent, 1), dtype=np.float32)
 
         self.num_step = 0
@@ -159,7 +159,7 @@ class Env():
         self.robot_locations = np.stack([world_x, world_y], axis=1)
 
         # Initialize headings
-        self.angles = 0 * np.random.uniform(0, 2*np.pi, size=self.num_agent)
+        self.robot_angles = 0 * np.random.uniform(0, 2*np.pi, size=self.num_agent)
         # Perform initial sensing update for each agent
         for i in range(self.num_agent):
             cell = self.map_info.world_to_grid_np(self.robot_locations[i])
@@ -169,7 +169,7 @@ class Env():
                                                        round(self.sensor_range / self.map_info.res_m),
                                                        self.map_info.belief,
                                                        self.map_info.gt,
-                                                       np.rad2deg(self.angles[i]),
+                                                       np.rad2deg(self.robot_angles[i]),
                                                        360,
                                                        self.map_info.map_mask)
         
@@ -243,7 +243,7 @@ class Env():
 
                 # Belief 업데이트
                 cell = self.map_info.world_to_grid(self.robot_locations[j])
-                self.update_robot_belief(cell, np.rad2deg(self.angles[j]))
+                self.update_robot_belief(cell, np.rad2deg(self.robot_angles[j]))
 
         # Done 신호 생성
         self.num_step += 1

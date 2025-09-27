@@ -12,24 +12,34 @@ from scipy.spatial.distance import cdist
 
 
 class CBFEnv(Env):
+
     def __init__(self, episode_index: int | np.ndarray, cfg: dict):
         self.cfg = CBFEnvCfg(cfg)
         super().__init__(self.cfg)
-
+        # Simulation Parameters
         self.dt = self.cfg.physics_dt
         self.decimation = self.cfg.decimation
         self.max_episode_steps = self.cfg.max_episode_steps
-        self.patch_size = self.cfg.patch_size
 
         # 핵심 Planning State
-        self.local_patches = np.zeros((self.num_agent, self.patch_size, self.patch_size), dtype=np.float32)
-        self.pos_patches = np.zeros((self.patch_size, self.patch_size), dtype=np.float32)
-        self.virtual_ray = np.zeros((self.num_agent, self.cfg.num_rays), dtype=np.float32)
-        self.frontier_features = np.zeros((self.num_agent, self.cfg.num_cluster_state * self.cfg.num_valid_cluster), dtype=np.float32)
+        self.num_obstacles = np.zeros(self.num_agent, dtype=np.long)
+        self.num_neighbors = (self.num_agent-1) * np.ones(self.num_agent, dtype=np.long)
+        self.num_frontiers = np.zeros(self.num_agent, dtype=np.long)
 
-        self.num_frontiers = np.zeros((self.num_agent, 1), dtype=np.float32)
-        self.robot_target_angle = np.zeros((self.num_agent, 1), dtype=np.float32)
-        self.neighbor_states = np.zeros((self.num_agent, self.num_agent-1, 4), dtype=np.float32)
+        self.active_obstacles = np.zeros((self.num_agent, self.cfg.max_obs), dtype=np.long)
+        self.active_agents = np.zeros((self.num_agent, self.cfg.max_agents-1), dtype=np.long)
+
+        self.virtual_ray = np.zeros((self.num_agent, self.cfg.num_virtual_rays), dtype=np.float32)
+        self.local_frontiers = np.zeros((self.num_agent, self.cfg.num_rays, 2), dtype=np.float32)
+
+        self.cfvr_r = np.zeros(self.num_agent, dtype=np.float32)
+        self.cfvr_d = np.zeros(self.num_agent, dtype=np.float32)
+        self.cfvr_pos = np.zeros((self.num_agent, 2), dtype=np.float32)
+
+        # [agent_dim, max_dim, specific_dim]
+        self.obsacle_states = np.zeros((self.num_agent, self.cfg.max_obs, 2), dtype=np.float32)
+        self.neighbor_states = np.zeros((self.num_agent, self.cfg.max_agents-1, 4), dtype=np.float32)
+        self.neighbor_ids = np.zeros((self.num_agent, self.cfg.max_agents-1), dtype=np.long)
 
         # Done flags
         self.is_collided_obstacle = np.zeros((self.num_agent, 1), dtype=np.bool_)
@@ -37,9 +47,14 @@ class CBFEnv(Env):
         self.is_reached_goal = np.zeros((self.num_agent, 1), dtype=np.bool_)
         self.is_first_reached = np.ones((self.num_agent, 1), dtype=np.bool_)
 
+        # Additional Info
+        self.infos["safety"] = {}
+        self.infos["next_safety"] = {}
+
 
     def reset(self, episode_index: int = None):
         # 나머지 플래그는 사용하기 전 계산 되므로 초기화 X
+        self.actions = np.zeros((self.num_agent, self.cfg.num_act), dtype=np.float32)
         self.is_collided_obstacle = np.zeros((self.num_agent, 1), dtype=np.bool_)
         self.is_collided_drone = np.zeros((self.num_agent, 1), dtype=np.bool_)
         self.is_reached_goal = np.zeros((self.num_agent, 1), dtype=np.bool_)
@@ -101,78 +116,110 @@ class CBFEnv(Env):
         
     
 
-    def _pre_apply_action(self, actions: dict) -> None:
+    def _pre_apply_action(self, actions: np.ndarray) -> None:
         self.actions = actions.copy()
-    
+        self.preprocessed_actions = actions.copy()
+        # Acceleration & Angular Velocity 생성
+        self.preprocessed_actions[:, 0] *= self.max_lin_acc
+        self.preprocessed_actions[:, 1] *= self.max_ang_vel
     
 
-    def _apply_action(self, agent_id, action):
-        pass
-        
-
+    def _apply_action(self, agent_id):
+        # Acceleration을 바탕으로 속도 업데이트
+        self.robot_velocities[:, 0] += self.preprocessed_actions[:, 0] * np.cos(self.robot_angles) * self.dt
+        self.robot_velocities[:, 1] += self.preprocessed_actions[:, 1] * np.sin(self.robot_angles) * self.dt
+        self.robot_velocities[:, 0] = np.clip(self.robot_velocities[:, 0], -self.max_lin_vel, self.max_lin_vel)
+        self.robot_velocities[:, 1] = np.clip(self.robot_velocities[:, 1], -self.max_ang_vel, self.max_lin_vel)
+        # Non-Holodemic Model 특성에 의해 Position 먼저 업데이트
+        self.robot_locations[:, 0] += self.robot_velocities[:, 0] * self.dt
+        self.robot_locations[:, 1] += self.robot_velocities[:, 1] * self.dt
+        # Yaw rate를 바탕으로 각도 업데이트
+        self.robot_yaw_rate = np.clip(self.preprocessed_actions[:, 1], -self.max_ang_vel, self.max_ang_vel)
+        self.robot_angles = ((self.robot_angles + self.robot_yaw_rate * self.dt + np.pi) % (2 * np.pi)) - np.pi
+    
 
     def _compute_intermediate_values(self):
         """
             업데이트된 state값들을 바탕으로, obs값에 들어가는 planning state 계산
         """
-        # patch_center_coords = np.array([self.patch_size / 2.0, self.patch_size / 2.0])
-        # self.cur_dists = [np.linalg.norm(self.robot_locations[i] - self.goal_locations) for i in range(self.num_agent)]
+        drone_pos = np.hstack((self.robot_locations, self.robot_angles.reshape(-1, 1)))
+        
+        # 중복 없는 프론티어 탐지를 위해 임시 belief map 생성
+        belief_copy = self.map_info.belief.copy()
 
-        # # ================= Planning State for GNN ======================
-        self.graph_edge_index = create_fully_connected_edges(self.num_agent)
-        # self.centroids = np.mean(self.robot_locations, axis=0)
-        # drone_pos = np.hstack((self.robot_locations, self.angles.reshape(-1, 1)))
-        # drone_cell = self.map_info.world_to_grid_np(drone_pos[:, :2])
-        # for i in range(self.num_agent):
-        #     drone_pos_i = drone_pos[i]
-        #     drone_cell_i = drone_cell[i]
+        # Active Mask도 매 스텝에서 초기화
+        self.active_agents[:] = 0
+        self.active_obstacles[:] = 0
+        
+        for i in range(self.num_agent):
+            # Virtual Ray
+            drone_pos_i = drone_pos[i]
+            self.virtual_ray[i] = compute_virtual_rays(map_info=self.map_info,
+                                                       num_rays=self.cfg.num_virtual_rays, 
+                                                       drone_pos=drone_pos_i, 
+                                                       drone_cell=self.map_info.world_to_grid_np(drone_pos_i[:2].reshape(1, -1))[0])
+            # Relative States
+            rel_pos = world_to_local(drone_pos_i[:2], drone_pos[:, :2], drone_pos_i[2])
+            rel_vel = world_to_local(self.robot_velocities[i], self.robot_velocities, drone_pos_i[2])
+            distance = np.linalg.norm(rel_pos, axis=1)
+            active_agent_ids = np.where(np.logical_and(distance < self.cfg.d_max, distance > 1e-5))[0]
 
-        #     local_patch = self.compute_local_patch(drone_cell_i, self.map_info.belief)
-        #     local_patch, frontier_clusters = self.marking_frontier_pixels(local_patch=local_patch,
-        #                                                                   drone_poses=drone_pos_i, 
-        #                                                                   drone_cells=drone_cell_i,
-        #                                                                   agent_id=i)
-        #     self.local_patches[i] = local_patch
-        #     self.virtual_ray[i] = self._compute_virtual_rays(drone_pos=drone_pos_i, drone_cell=drone_cell_i)
+            self.neighbor_states[i, :len(active_agent_ids), :2] = rel_pos[active_agent_ids]
+            self.neighbor_states[i, :len(active_agent_ids), 2:] = rel_vel[active_agent_ids]
+            self.num_neighbors[i] = len(active_agent_ids)
+            self.neighbor_ids[i, :self.num_neighbors[i]] = active_agent_ids
 
-        #     for j in range(self.cfg.num_valid_cluster):
-        #         cluster = frontier_clusters[j]
-        #         centroid_vec = (np.flip(cluster['centroid']) - patch_center_coords) * self.cell_size
-        #         centroid_vec[1] *= -1 
-                
-        #         idx = j * self.cfg.num_cluster_state
-        #         self.frontier_features[i, idx : idx+2] = centroid_vec
-        #         self.frontier_features[i, idx+2] = cluster['size'] 
+            # Obstacles & Frontiers Sensing
+            local_frontiers, local_obstacles = self._sense_local_environment(
+                agent_id=i, belief_map_t=belief_copy
+            )
+            # Store obstacle information
+            num_obs = min(len(local_obstacles), self.cfg.max_obs)
+            if num_obs > 0:
+                self.obsacle_states[i, :num_obs] = local_obstacles[:num_obs]
+            self.num_obstacles[i] = num_obs
+            # Store frontier information
+            self.num_frontiers[i] = len(local_frontiers)
+            self.local_frontiers[i, :self.num_frontiers[i]] = local_frontiers
+
+            # CFVR (Continuous Frontier Visibility Region)
+            self.cfvr_d[i], self.cfvr_r[i], self.cfvr_pos[i] = self.get_CFVR(drone_pos_i[:2], local_frontiers)
+
+            # Active Mask
+            self.active_agents[i, :self.num_neighbors[i]] = 1
+            self.active_obstacles[i, :self.num_obstacles[i]] = 1
+        
 
     
-    def _get_observations(self) -> np.ndarray | dict:
+    def _get_observations(self) -> np.ndarray | dict | list[dict]:
         """
             Observation Config for Actor Network [n, obs_dim]
         """
-        # obs = {
-        #     "graph_features": np.hstack([self.robot_pose [x,y,yaw],       # (3)
-        #                                  self.robot_velocities [vx,vy,w], # (3)
-        #                                  self.virtual_ray,                # (36)
-        #                                  self.frontier_features]),        # (9)
+        all_observations = []
+        for i in range(self.num_agent):
+            local_edge_index = create_fully_connected_edges(num_nodes=self.num_neighbors[i]+1)
+            node_features = self.get_node_features(i)
+            obs = {
+                "graph_features": node_features,
+                "edge_index": local_edge_index       
+            }
+            all_observations.append(obs)
 
-        #     "edge_index": self.graph_edge_index        
-
-        # }
-        obs = {
-            "graph_features": np.zeros((self.cfg.num_obs, ), dtype=np.float32),
-            "edge_index": self.graph_edge_index        
-        }
-
-        return obs
+        return all_observations
     
 
     def _get_states(self) -> np.ndarray | dict:
         """
-            State Config for Critic Network [n, state_dim]
+            State Config for Critic Network [agent_dim, state_dim]
+                1. agent_dim : Centralized Critic 특성 상, 모든 에이전트를 Node화
+                2. state_dim : 각 Node가 가져야 할 고유 Features
+                3. edge_dim  : 모든 에이전트를 연결시켜야 하므로 Fully Connected Edge를 agent_dim으로 생성
         """
 
+        self.graph_edge_index = create_fully_connected_edges(self.num_agent)
+        global_node_features = self.get_global_features()
         state = {
-            "graph_features": np.zeros((self.cfg.num_state, ), dtype=np.float32),
+            "graph_features": global_node_features,
             "edge_index": self.graph_edge_index        
         }
 
@@ -250,177 +297,151 @@ class CBFEnv(Env):
 
         return reward
     
+
     def _update_infos(self):
-        pass
+        self.infos["safety"]["v_current"] = np.sqrt(self.robot_velocities[:, 0]**2 + self.robot_velocities[:, 1]**2) # (A,)
+        self.infos["safety"]["p_obs"] = self.obsacle_states # (A, M, 2)
+        self.infos["safety"]["p_agents"] = self.neighbor_states[:, :, :2] # (A, M, 2)
+        self.infos["safety"]["v_agents_local"] = self.neighbor_states[:, :, 2:] # (A, M, 2)
+
+        # Boolean 자료형으로.. [0, 1]
+        self.infos["safety"]["agent_active"] = self.active_agents # (A, M)
+        self.infos["safety"]["obs_active"] = self.active_obstacles # (A, M)
+
 
 
     # ============= Auxilary Methods ==============
-    # def compute_local_patch(
-    #     self,
-    #     drone_cell: np.ndarray,        # [col, row] in cell indices
-    #     belief_map: np.ndarray,        # 2D grid of ints (0=free, 1=unknown, 2=obstacle, etc.)
-    #     ) -> Tuple[np.ndarray, np.ndarray]:
-    #     """
-    #         Extract a patch around the drone and compute APF.
+    def _sense_local_environment(self, 
+                                 agent_id: int, 
+                                 belief_map_t: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        에이전트의 시점에서 레이캐스팅을 수행하여 프론티어와 장애물의 로컬 좌표를 탐지합니다.
+        중복 탐지를 피하기 위해 임시 belief map을 사용합니다.
 
-    #         Returns:
-    #         - apf_vec: 2D APF vector [vx, vy]
-    #         - patch:   the extracted patch (patch_size x patch_size)
-    #     """
-    #     H, W = self.map_info.belief.map.shape
-    #     half = self.patch_size // 2
+        Args:
+            agent_id (int): 에이전트의 인덱스
+            belief_map_t (np.ndarray): 탐지 및 마킹에 사용될 임시 belief map
+
+        Returns:
+            Tuple[np.ndarray, np.ndarray]:
+            - local_frontiers (np.ndarray): 에이전트의 로컬 좌표계 기준 프론티어 점 (Nx2)
+            - local_obstacles (np.ndarray): 에이전트의 로컬 좌표계 기준 장애물 점 (Mx2)
+        """
+        drone_pose = np.hstack((self.robot_locations[agent_id], self.robot_angles[agent_id]))
         
-    #     c, r = int(drone_cell[0]), int(drone_cell[1])
+        max_range = 5.0
+        map_info = self.map_info
+        H, W = belief_map_t.shape
         
-    #     # 1) 패치 범위: [r-half, r+half), [c-half, c+half)
-    #     r0 = r - half
-    #     r1 = r + half
-    #     c0 = c - half
-    #     c1 = c + half
+        drone_x_world, drone_y_world, yaw_rad = drone_pose
 
-    #     # 2) 맵 바깥 클램핑
-    #     r0_clip, r1_clip = max(r0, 0), min(r1, H)
-    #     c0_clip, c1_clip = max(c0, 0), min(c1, W)
+        local_frontiers = []
+        local_obstacles = []
+        
+        start_angle = yaw_rad - np.deg2rad(self.fov / 2)
+        end_angle = yaw_rad + np.deg2rad(self.fov / 2)
+        angles = np.linspace(start_angle, end_angle, self.cfg.num_rays)
 
-    #     # 3) 패치 내 복사 시작 인덱스
-    #     pr0 = r0_clip - r0    # if r0<0, pr0>0
-    #     pc0 = c0_clip - c0
+        start_c, start_r = self.map_info.world_to_grid_np(np.array([[drone_x_world, drone_y_world]]))[0]
 
-    #     # 4) 추출 & 복사
-    #     patch = np.ones((self.patch_size, self.patch_size), dtype=belief_map.dtype)  # UNKNOWN=1
-    #     h_src = r1_clip - r0_clip  # always <= patch_size
-    #     w_src = c1_clip - c0_clip
-    #     patch[pr0:pr0 + h_src, pc0:pc0 + w_src] = belief_map[r0_clip:r1_clip, c0_clip:c1_clip]
+        for angle in angles:
+            end_x_world = drone_x_world + max_range * np.cos(angle)
+            end_y_world = drone_y_world + max_range * np.sin(angle)
+            end_c, end_r = self.map_info.world_to_grid_np(np.array([[end_x_world, end_y_world]]))[0]
 
-    #     return patch
+            prev_cell_val = belief_map_t[start_r, start_c]
 
+            for r, c in bresenham_line(start_c, start_r, end_c, end_r):
+                if r == start_r and c == start_c:
+                    continue
 
-    # def marking_frontier_pixels(self,
-    #                             drone_poses: np.ndarray,
-    #                             drone_cells: np.ndarray,
-    #                             local_patch: np.ndarray = None,
-    #                             agent_id: int = None,
-    #                             fov_deg = 120.0,
-    #                             num_rays = 40) -> tuple[np.ndarray, list[dict]]:
-    #     half = self.patch_size // 2
-    #     c, r = int(drone_cells[0]), int(drone_cells[1])
-    #     r0, r1 = r - half, r + half
-    #     c0, c1 = c - half, c + half
+                if not (0 <= r < H and 0 <= c < W):
+                    break
+                
+                current_cell_val = belief_map_t[r, c]
+                hit_point_world = self.map_info.grid_to_world_np(np.array([[c, r]]))[0]
 
-    #     frontiers = self.extract_frontier_pixels(drone_pose=drone_poses, 
-    #                                                 fov_deg=fov_deg, 
-    #                                                 num_rays=num_rays)
-    #     self.num_frontiers[agent_id] = frontiers.shape[0]
+                if current_cell_val == self.map_info.map_mask["occupied"]:
+                    local_pt = world_to_local(drone_pose[:2], np.array([hit_point_world]), drone_pose[2])[0]
+                    local_obstacles.append(local_pt)
+                    break
+                
+                if current_cell_val == self.map_info.map_mask["frontier"]:
+                    break
+
+                if prev_cell_val == self.map_info.map_mask["free"] and current_cell_val == self.map_info.map_mask["unknown"]:
+                    local_pt = world_to_local(drone_pose[:2], np.array([hit_point_world]), drone_pose[2])[0]
+                    local_frontiers.append(local_pt)
+                    belief_map_t[r, c] = self.map_info.map_mask["frontier"]
+                    break
+                
+                prev_cell_val = current_cell_val
+
+        return np.array(local_frontiers), np.array(local_obstacles)
     
-    #     if self.num_frontiers[agent_id] > 0:
-    #         for row, col in frontiers:
-    #             # patch에 frontier 표시
-    #             if r0 <= row < r1 and c0 <= col < c1:
-    #                 pr = row - r0
-    #                 pc = col - c0
-    #                 if 0 <= pr < self.patch_size and 0 <= pc < self.patch_size:
-    #                     local_patch[pr, pc] = self.map_info.map_mask["frontier"]
+    def get_CFVR(self, pos: np.ndarray, frontiers: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        dx = pos[0] - frontiers[:, 0]
+        dy = pos[1] - frontiers[:, 1]
+        alpha = np.atan2(dy, dx)
+        angle_diff = np.max(alpha) - np.min(alpha)
 
-    #     clustered_frontier = self.marking_frontier_utility(local_patch, max_cluster=self.cfg.num_valid_cluster)
+        psi = np.atan2(np.sin(angle_diff), np.cos(angle_diff))
+        d = self.sensor_range / (1+np.sin(psi/2))
+        r = self.sensor_range * np.sin(psi/2) / (1+np.sin(psi/2))
 
-    #     return local_patch, clustered_frontier
+        alpha_mid = np.min(alpha) + psi / 2
+        center_x = pos[0] + d * np.cos(alpha_mid)
+        center_y = pos[1] + d * np.sin(alpha_mid)
+        center = np.array([center_x, center_y])
 
-
-    # def extract_frontier_pixels(self,
-    #                             drone_pose, 
-    #                             fov_deg=120.0,
-    #                             num_rays=40) -> np.ndarray:
-    #     """
-    #     업데이트 된 Belief Map 내부에서
-    #     bresenham_line을 사용하여 raycasting 방식으로 frontier pixel을 추출
-    #     """
-    #     max_range = 5.0  # meter
-    #     map_info = self.map_info.belief
-    #     belief_map = self.map_info.belief
-    #     H, W = belief_map.shape
+        return d, r, center
         
-    #     # 드론 월드 좌표 (meter)
-    #     try:
-    #         drone_x_world, drone_y_world, yaw_rad = drone_pose
-    #     except:
-    #         drone_x_world, drone_y_world, yaw_rad = drone_pose[0]
+
+    def get_node_features(self, agent_id: int):
+        num_neighbors = self.num_neighbors[agent_id]
+        total_ids = np.hstack((agent_id, self.neighbor_ids[agent_id, :num_neighbors]))
         
-    #     # 드론 셀 좌표
-    #     drone_c = int((drone_x_world - map_info.map_origin_x) / map_info.cell_size)
-    #     drone_r = int(H - 1 - (drone_y_world - map_info.map_origin_y) / map_info.cell_size)
+        pos = self.robot_locations[total_ids]                       # (N, 2)
+        vel = self.robot_velocities[total_ids]                      # (N, 2)
+        yaw = self.robot_angles[total_ids].reshape(-1, 1)           # (N, 1)
+        yaw_rate = self.robot_yaw_rate[total_ids].reshape(-1, 1)    # (N, 1)
+        virtual_ray = self.virtual_ray[total_ids]                   # (N, R)
+        num_frontier = self.num_frontiers[total_ids].reshape(-1, 1) # (N, 1)
+        cfvr_r, cfvr_d, cfvr_pos = self.cfvr_r[total_ids], self.cfvr_d[total_ids], self.cfvr_pos[total_ids] # (N, 4)
 
-    #     frontier_coords = set() # 중복 제거를 위해 set 사용
+        return np.hstack((pos,
+                          vel,
+                          yaw,
+                          yaw_rate,
+                          virtual_ray,
+                          num_frontier,
+                          cfvr_r.reshape(-1, 1),
+                          cfvr_d.reshape(-1, 1),
+                          cfvr_pos)) # (N, 11+R)
+    
+
+    def get_global_features(self):
+        pos = self.robot_locations
+        vel = self.robot_velocities
+        yaw = self.robot_angles.reshape(-1, 1)
+        yaw_rate = self.robot_yaw_rate.reshape(-1, 1)
+        virtual_ray = self.virtual_ray
+        num_frontier = self.num_frontiers.reshape(-1, 1)
+        cfvr_r, cfvr_d, cfvr_pos = self.cfvr_r, self.cfvr_d, self.cfvr_pos
+        action = self.actions
+
+        return np.hstack((pos,
+                          vel,
+                          yaw,
+                          yaw_rate,
+                          virtual_ray,
+                          num_frontier,
+                          cfvr_r.reshape(-1, 1),
+                          cfvr_d.reshape(-1, 1),
+                          cfvr_pos,
+                          action)) # (N, 13+R)
+
         
-    #     # 시야각에 맞춰 레이를 쏠 각도 계산
-    #     start_angle = yaw_rad - np.deg2rad(fov_deg / 2)
-    #     end_angle = yaw_rad + np.deg2rad(fov_deg / 2)
-    #     angles = np.linspace(start_angle, end_angle, num_rays)
 
-    #     for angle in angles:
-    #         # 레이의 끝점 계산 (월드 좌표)
-    #         end_x_world = drone_x_world + max_range * np.cos(angle)
-    #         end_y_world = drone_y_world + max_range * np.sin(angle)
-            
-    #         # 끝점 셀 좌표
-    #         end_c = int((end_x_world - map_info.map_origin_x) / map_info.cell_size)
-    #         end_r = int(H - 1 - (end_y_world - map_info.map_origin_y) / map_info.cell_size)
-
-    #         # 레이 캐스팅 실행
-    #         prev_cell_val = None
-    #         for r, c in bresenham_line(drone_c, drone_r, end_c, end_r):
-    #             if not (0 <= r < H and 0 <= c < W):
-    #                 break
-
-    #             current_cell_val = belief_map[r, c]
-
-    #             # free(0) 셀을 지나 unknown(1) 셀을 만나면 프론티어로 간주
-    #             if prev_cell_val == self.map_info.map_mask["free"] and current_cell_val == self.map_info.map_mask["unknown"]:
-    #                 frontier_coords.add((r, c))
-    #                 break
-                
-    #             # 장애물(2)을 만나면 이 레이는 더 이상 진행하지 않음
-    #             if current_cell_val == self.map_info.map_mask["occupied"]:
-    #                 break
-                
-    #             prev_cell_val = current_cell_val
-
-    #     return np.array(list(frontier_coords))
-
-
-    # def marking_frontier_utility(self,
-    #                             frontier_patch: np.ndarray,
-    #                             min_samples: int = 5,
-    #                             max_cluster: int = 3
-    #                             ) -> list[dict]:
-    #     frontier_coords = np.argwhere(frontier_patch == self.map_info.map_mask["frontier"])
-    #     num_frontiers = frontier_coords.shape[0]
         
-    #     clusters = []
-    #     if num_frontiers >= min_samples:
-    #         dbscan = DBSCAN(eps=5.0, min_samples=min_samples).fit(frontier_coords)
-    #         labels = dbscan.labels_
-    #         unique_labels = set(labels)
-    #         if -1 in unique_labels:
-    #             unique_labels.remove(-1) 
-            
-    #         for label in unique_labels:
-    #             points_in_cluster = frontier_coords[labels == label]
-    #             clusters.append({
-    #                 'size': len(points_in_cluster),
-    #                 'centroid': np.mean(points_in_cluster, axis=0)
-    #             })
-    #         clusters.sort(key=lambda c: c['size'], reverse=True)
         
-    #     elif num_frontiers > 0:
-    #         # 각 점을 크기 1의 클러스터로 취급
-    #         for coord in frontier_coords:
-    #             clusters.append({'size': 1, 'centroid': coord})
-
-    #     slicing = min(max_cluster, len(clusters))
-    #     final_clusters = clusters[:slicing]
-
-    #     delta_num = max_cluster - slicing
-    #     for _ in range(delta_num):
-    #         final_clusters.append({'size': 0, 'centroid': np.zeros(2)})
-                
-    #     return final_clusters

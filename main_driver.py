@@ -58,6 +58,8 @@ class MainDriver:
         self.cfg['model']['safety']['d_max'] = temp_env.cfg.d_max
         self.cfg['model']['safety']['d_obs'] = temp_env.cfg.d_obs
         self.cfg['model']['safety']['d_safe'] = temp_env.cfg.d_safe
+        self.cfg['model']['safety']['max_agents'] = temp_env.cfg.max_agents
+        self.cfg['model']['safety']['max_obs'] = temp_env.cfg.max_obs
         del temp_env
 
         # --- Centralized Components ---
@@ -96,8 +98,8 @@ class MainDriver:
         model_cfg = self.cfg['model']
 
         # Feature Extractor
-        global_feature_extractor = GNN_Feature_Extractor(state_dim, model_cfg['feature_extractor'])
-        local_feature_extractor = GNN_Feature_Extractor(obs_dim, model_cfg['feature_extractor'])
+        global_feature_extractor = GNN_Feature_Extractor(state_dim, model_cfg['feature_extractor'], "global")
+        local_feature_extractor = GNN_Feature_Extractor(obs_dim, model_cfg['feature_extractor'], "local")
 
         # Policy
         actor_type = model_cfg['actor']['type']

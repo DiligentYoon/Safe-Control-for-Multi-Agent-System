@@ -53,8 +53,8 @@ class OffPolicyWorker:
         """Creates the policy and critic models."""
 
         # Feature Extractor
-        global_feature_extractor = GNN_Feature_Extractor(state_dim, model_cfg['feature_extractor'])
-        local_feature_extractor = GNN_Feature_Extractor(obs_dim, model_cfg['feature_extractor'])
+        global_feature_extractor = GNN_Feature_Extractor(state_dim, model_cfg['feature_extractor'], "global")
+        local_feature_extractor = GNN_Feature_Extractor(obs_dim, model_cfg['feature_extractor'], "local")
         
         # Policy
         actor_type = model_cfg['actor']['type']

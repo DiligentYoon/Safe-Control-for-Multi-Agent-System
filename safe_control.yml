@@ -1,33 +1,48 @@
 name: safe_control
 channels:
-  - anaconda
-  - defaults
+  - pytorch
+  - nvidia
   - conda-forge
+  - defaults
 dependencies:
-  # --- 기본 및 데이터 사이언스 패키지 ---
-  - python=3.11  
-  - numpy
-  - pandas
-  - scikit-learn
-  - matplotlib
-  - scipy
-  - sympy
-  - casadi
-  
-  # --- 웹 및 유틸리티 패키지 ---
-  - fastapi
-  - uvicorn
-  - requests
-  - pyyaml
-  - tqdm 
-
-  # --- pip 패키지 ---
+  # --- 1. 핵심 환경 구성 ---
+  - python=3.10
   - pip
+
+  # --- 2. PyTorch 및 CUDA ---
+  # Conda를 통해 설치하여 안정성 확보
+  - pytorch::pytorch
+  - pytorch::torchvision
+  - pytorch::torchaudio
+  - pytorch::pytorch-cuda=12.1
+
+  # --- 3. 핵심 과학 계산 및 GNN 라이브러리 ---
+  # Conda가 Python 3.10에 맞는 최적의 호환 버전을 찾아 설치
+  - numpy
+  - scipy>=1.11
+  - pandas
+  - matplotlib
+  - scikit-learn
+  - torch-geometric # PyTorch Geometric
+  - cvxpy>=1.4
+  - ecos
+  - scs
+  - pyyaml
+  - tqdm
+  - imageio
+  
+  # --- 4. Pip으로 설치할 패키지들 ---
+  # Conda에 없거나, Pip 설치가 더 일반적인 패키지
   - pip:
-      - ffmpeg-python==0.2.0
-      - future==1.0.0
-      - httptools==0.6.4
-      - py-spy==0.4.0
-      - python-dotenv==1.1.0
-      - ray==2.44.0
-      - websockets==15.0.1
+    - casadi
+    - ray[rllib]
+    - wandb
+    - fastapi
+    - uvicorn[standard]
+    - git+https://github.com/cvxgrp/diffcp.git
+    - git+https://github.com/cvxgrp/cvxpylayers.git
+
+
+# === 추가로 수행해야 할 명령어 ===
+# pip install git+https://github.com/cvxgrp/cvxpylayers.git
+# pip install git+https://github.com/cvxgrp/diffcp.git
